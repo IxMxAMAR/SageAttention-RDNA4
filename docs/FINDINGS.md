@@ -60,7 +60,7 @@ Where a later result overturned or corrected an earlier one, both entries say so
 
 **Phase 3: the hand-written kernel**
 
-13. [SK1: a hand-written HIP kernel](#13-sk1-a-hand-written-hip-kernel) (14 entries)
+13. [SK1: a hand-written HIP kernel](#13-sk1-a-hand-written-hip-kernel) (15 entries)
 
 **Phase 4: shipping**
 
@@ -608,7 +608,7 @@ Accuracy work on real activations captured from Krea2 and Flux2-Klein: how per-t
 
 **Result.** The picture is split, not a win. PR #368 is more accurate at Krea2 block 26 by 14–27× at every latent scale, and on Klein (by 59× and 101× at two blocks, which the file says to treat as upper bounds). Ours wins at Krea2 block 0, by up to 55× at one setting, but that win is regime-fragile: PR #368 wins there by 5× at ×0.25 latent scale. Ours is flat across scales (KL 3.7e-3 to 4.7e-3); worst-case KL is 4.7e-3 for ours against 1.8e-1 for PR #368. The schemes are fp32 torch re-implementations, not the shipped kernels, and the text context is a random surrogate of the right width.
 
-**Status:** confirmed. F061 later showed the `dlogit` magnitudes were overstated by 1.09–3.17×; the rankings survive.
+**Status:** confirmed, with a correction. F061 later showed the `dlogit` magnitudes were overstated by 1.09–3.17×. F154 later found that PR #368's kernel also quantizes Q to int8 (per 32 rows), which this re-implementation left out. With Q quantized, PR #368's lead on the calm layers shrinks to 3.3–6.4×; its worst case is unchanged.
 
 ### F061 — Per-token int8 Q/K against fp8 and PR #368
 
@@ -616,7 +616,7 @@ Accuracy work on real activations captured from Krea2 and Flux2-Klein: how per-t
 
 **Result.** The headline was corrected on 2026-09-27. The arm pre-registered without mean subtraction (`int8tok`) fails on all 10 captures: 2.8–7.1× worse than PR #368 on the 6 benign captures and 39–54× worse than ours at Krea2 block 0. The file's own arm `int8tok_smseq` (the `smooth_k` mean removed first, then per-token int8) beats PR #368 on 7 of 10 (ties 1, loses 3 by 1.1–1.8×) and beats ours on 10 of 10, with worst-case KL 1.51e-3 against 5.18e-3 for ours and 1.81e-1 for PR #368.
 
-**Status:** confirmed (the corrected headline). Corrects F058; it led to the int8-QK work in F081 and F083.
+**Status:** confirmed (the corrected headline). Corrects F058; it led to the int8-QK work in F081 and F083. Against the corrected PR #368 model of F154, `int8tok_smseq` is more accurate on all 10 captures.
 
 ### F063 — `smooth_k` accuracy on real captures
 
@@ -1357,6 +1357,14 @@ A hand-written HIP kernel, SK1, designed from what the Triton work had learned. 
 **Result.** Design only. The premise that the matrix pipe needs to be kept busier is already refuted by measurement: `sk1_t4a1` runs it at 43.7% of its measured peak with dependent latency hidden, and 107 of the 161 `WAIT`/`SCHED` slots are ALU dependency-counter scaffolding, not memory waits. FlashAttention-3's overlap schemes do not port (gfx1201 lacks async WGMMA, TMA, `setmaxnreg` and sub-workgroup named barriers). Of three RDNA4-native structures costed against the real register and LDS budgets, S1a is refused on registers (264 VGPR), S2 on LDS (4 buffers need 67 584 B against a 65 536 B cap) and S3 three ways; only S1b survives, with a predicted net gain of +2.2% to +13.6% (point estimate +3.4%, below the 10% bar) that rests on assumed clock readings and an assumed overlap fraction.
 
 **Status:** open (design only; nothing built or promoted).
+
+### F154 — int8 Q·K in the hand-written kernel
+
+**Question.** Does PR #368's kernel really leave Q in fp16, and can per-token int8 Q·K with `smooth_k` make the hand-written kernel more accurate without costing speed?
+
+**Result.** PR #368's source quantizes Q to int8 inside the kernel, with one scale per 32 rows. The fp32 re-implementation behind F058 left Q unquantized, which made PR #368 look more precise than it is. With Q quantized, PR #368 still beats per-token fp8 on the calm layers, now by 3.3–6.4×, and still loses by 4.8–200× on Krea2's first block. Per-token int8 Q·K with `smooth_k` beats per-token fp8 on 9 of 10 captures and the corrected PR #368 model on all 10. On this card the int8 and fp8 matrix instructions run at the same rate (27 cycles dependent latency for both). The int8 variant of the shipped kernel (`sk1_t6i`) is more accurate than the shipped fp8 kernel on every test cell: error ratio 0.59–0.91 on real captures, 0.97–0.98 on the reference cells, at most 1.0 on all 112 edge cells. It has no non-finite output up to the fp16 maximum and is 1.6–2.5 % slower (kernel-only, against a 3 % bar).
+
+**Status:** confirmed. Not shipped yet; the shipped default is still the fp8 kernel.
 
 ## 14. Packaging, shipping and end to end
 

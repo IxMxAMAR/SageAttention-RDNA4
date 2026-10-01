@@ -56,11 +56,11 @@ are folded into fp8 before the P·V product. Two consequences, both measured on 
 captured from Krea2 and Flux2-Klein:
 
 - **No bad regime.** PR #368 computes Q·K in int8, with one K scale per block of 64 tokens. On
-  well-behaved layers that is more precise than this package. On layers with a few extreme keys,
-  such as Krea2's first block, one outlier sets the scale for all 64 tokens, and its error was up
-  to 55× this package's. Per-token scaling does not have that failure mode: the
+  well-behaved layers that is 3–6× more precise than this package. On layers with a few extreme
+  keys, such as Krea2's first block, one outlier sets the scale for all 64 tokens, and its error was
+  up to 200× this package's. Per-token scaling does not have that failure mode: the
   error stays flat across blocks, models, timesteps and resolutions. Details are in
-  [docs/FINDINGS.md](docs/FINDINGS.md) (F058).
+  [docs/FINDINGS.md](docs/FINDINGS.md) (F058, F154).
 - **`smooth_k` is on by default** and should stay on. Subtracting the per-head key mean before
   quantizing is exact in real arithmetic, and it reduced this kernel's error on 10 of 10 real
   captures, by 3.2× on average (F063). The cost is 0.4–4 % per call.

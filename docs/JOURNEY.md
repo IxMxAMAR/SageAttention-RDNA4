@@ -70,9 +70,14 @@ The answer was more interesting than "better" or "worse":
 - PR #368 computes Q·K in int8, with one K scale per 64-token block. On well-behaved layers that
   is the more precise scheme, by a wide margin.
 - On a layer with a few extreme keys (Krea2's first block is one), a single outlier sets the scale
-  for its whole block, and the error explodes: up to 55× worse than per-token fp8.
+  for its whole block, and the error explodes: up to 55× worse than per-token fp8, and up to 200×
+  once `smooth_k` was added to per-token fp8.
 - Per-token fp8 scaling never has a bad regime. Its error is flat across blocks, models, timesteps
   and resolutions.
+
+One correction came much later. PR #368's kernel quantizes Q to int8 as well, and the comparison
+above had left that out. With it fixed, PR #368's lead on calm layers shrank from up to 11× to
+3–6× (F154).
 
 Two follow-ups settled the defaults. Subtracting the per-head key mean before quantizing
 (`smooth_k`) is exact in real arithmetic and improved the per-token kernel on 10 of 10 captures, by
@@ -190,9 +195,9 @@ kernel's input envelope to strided and NHD inputs, which is what video models su
 
 ## 9. What is next
 
-- **int8 Q·K with per-token scales.** Measured offline, it is more accurate than per-token fp8 on
-  9 of 10 real captures, by 1.7–11.7×, and it keeps the robustness of per-token scaling. If it runs
-  at fp8 speed on this chip, it should beat PR #368 on accuracy as well as speed.
+- **int8 Q·K with per-token scales.** int8 and fp8 matrix instructions turned out to run at the same
+  rate on this chip, and a first int8 kernel is built. It is more accurate than the shipped fp8
+  kernel on every test cell, about 2 % slower, and not shipped yet (F154).
 - **The overlap probe and `s_setprio`.** Both are cheap experiments that decide whether the
   structural rewrite is worth building.
 - **head_dim 64,** for older model families.
