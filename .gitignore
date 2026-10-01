@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.o
+*.obj
+*.lib
+*.exp
+
+build/
+dist/
+*.egg-info/
+.eggs/
+wheelhouse/
+
+# Files torch's hipify step writes next to the sources in csrc/
+csrc/**/*.hip
+csrc/**/*_hip.*
+
+.pytest_cache/
+.venv/
+venv/
+env/

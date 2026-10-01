@@ -1,0 +1,31 @@
+SageAttention-RDNA4
+
+This repository is a derivative of SageAttention and bundles code from other
+projects. All of it is distributed under the Apache License, Version 2.0 (see
+LICENSE).
+
+SageAttention
+  https://github.com/thu-ml/SageAttention
+  Copyright (c) 2024 by the SageAttention team (thu-ml), Apache-2.0.
+  The sageattention/ package (quantisation, the Triton kernels, the sageattn
+  dispatcher) and the CUDA/HIP sources under csrc/ originate from SageAttention
+  2.2.0.
+
+SageAttention pull request #368, gfx12 native port, by DELUXA
+  https://github.com/thu-ml/SageAttention/pull/368
+  The gfx12 (RDNA4) native extension (csrc/qattn/*gfx12_native*, the HIP build
+  in setup.py, and the gfx12 paths in sageattention/core.py) come from this pull
+  request. The upstream pull request carries the unmodified Apache-2.0 licence
+  text and no separate NOTICE file.
+
+Additions in this repository
+  The hand-written gfx1201 fp8 attention kernel (kernels/hip/), its ctypes
+  loader and code-object build script (sageattention/sk1_backend/sk1_loader.py,
+  tools/build_hsaco.py), the fused fp8 quantiser (sageattention/sk1_backend/
+  quant_*.py), the routing that sends fp16, head_dim 128 attention on gfx1201
+  to that kernel, the tests and benchmarks, and the Triton research code under
+  research/triton/ are original to this repository and are also released under
+  Apache-2.0.
+
+Changes to upstream files are limited to what the gfx12 port and the routing
+require; comments and docstrings were revised.

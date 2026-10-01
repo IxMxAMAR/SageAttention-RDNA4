@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+include NOTICE
+include pyproject.toml
+recursive-include sageattention *.py *.hsaco *.pyd
+recursive-include csrc *.cu *.cuh *.cpp *.h
+recursive-include kernels *.hip
+include tools/build_hsaco.py
