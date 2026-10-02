@@ -156,7 +156,9 @@ the gfx12 kernel from PR #368, with the same results contract:
 
 - the GPU is `gfx1201`, the HIP runtime resolves, and the code object loads;
 - fp16 or bf16 inputs and head_dim 128;
-- HND or NHD layout (strided views are fine);
+- HND or NHD layout, either contiguous or a view whose memory is laid out as NHD, which covers
+  the usual ComfyUI paths. Views into one fused QKV buffer, which is how MiniMax H3 passes them,
+  are not served yet and fall back;
 - query length equal to key length, either fully causal or non-causal;
 - no attention mask, `return_lse=False`, `smooth_v=False`.
 
@@ -167,16 +169,21 @@ tries the bf16 kernel, then PR #368's.
 |---|---|
 | `SAGEATTN_SK1_BACKEND` unset | default: use the kernels where they apply, fall back silently elsewhere |
 | `SAGEATTN_SK1_BACKEND=0` | never use them |
-| `SAGEATTN_SK1_BACKEND=1` | require them: raise instead of falling back when they cannot load |
+| `SAGEATTN_SK1_BACKEND=1` | strict: raise instead of falling back when the kernels cannot load or the GPU is not `gfx1201` |
 | `SAGEATTN_SK1_INT8` unset | default: int8 Q·K for fp16 calls |
 | `SAGEATTN_SK1_INT8=0` | fp8 Q·K for fp16 calls, bit-identical to v0.1.0 |
-| `SAGEATTN_SK1_INT8=1` | require int8: raise when an fp16 call cannot use it |
+| `SAGEATTN_SK1_INT8=1` | strict: raise instead of falling back when the int8 kernel is missing or fails to load, or for a head_dim 64 call |
 | `SAGEATTN_SK1_BF16` unset | default: bf16 calls use the hand-written kernel |
 | `SAGEATTN_SK1_BF16=0` | bf16 calls go to PR #368's path, as in v0.1.0 |
-| `SAGEATTN_SK1_BF16=1` | require it: raise when a bf16 call cannot use it |
+| `SAGEATTN_SK1_BF16=1` | strict: raise instead of falling back when the bf16 kernel is missing or fails to load, or for a head_dim 64 call |
 
 The variables are read once, when the package is imported. `SAGEATTN_SK1_BACKEND=0` turns all of
 them off. The same switches exist per call: `sageattn(..., sk1_backend=, sk1_int8=, sk1_bf16=)`.
+
+Strict mode is about loading the kernels, not about the list above. A call outside it (a mask,
+`return_lse`, an unsupported stride pattern) still falls back silently with a switch set to `1`.
+To see whether a call is served, call `sageattention.sk1_backend.try_sk1_t1(q, k, v,
+tensor_layout=...)` directly: it returns `(None, reason)` for a call it refuses.
 
 If the kernels cannot be used at all, for example on a different GPU, the package logs one line
 per process and carries on with the fallback.
