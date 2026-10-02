@@ -38,6 +38,11 @@ PyTorch.
    16 GB in use, PyTorch's caching allocator thrashed: step times doubled and became bimodal,
    while repeated renders of identical code still produced bit-identical images. With expandable
    segments, repeated renders agree within 0.5 %.
+10. **Memory state is part of the measurement.** How full the GPU's memory is during a block can
+   change one candidate and not another. PR #368's bf16 path ran 1.7–1.9× slower in a process
+   holding nearly all 16 GB than in one that was not, while the hand-written kernel did not
+   move. Both numbers are real. Each block records its free memory, and headline ratios are
+   taken without memory pressure.
 
 ## 2. Correctness
 
@@ -112,3 +117,4 @@ Never quote a ratio of two *achieved* numbers (1.8× here) as the instruction ra
 | a speed-up from a variant that changed nothing | the timing harness silently overwrote one A/A twin with the other | A/A ratios derived from raw medians |
 | a "new kernel" end-to-end result | the model ran in bf16; the kernel accepts fp16 only and fell back silently | prove which kernel served each call (§2.6, F152) |
 | a black image in a real render | P × V-scale overflowed fp8 for one large-V token; no test had |V| > 448 | outlier sweep (§2.4) |
+| a 2.1–3.3× bf16 speed-up over PR #368, taken as the general figure | it was measured with nearly all VRAM held, where PR #368's bf16 path thrashes; without that pressure the gap is 1.3–2.2× | record the memory state (§1.10) |

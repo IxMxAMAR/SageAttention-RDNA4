@@ -28,7 +28,7 @@ The compiler is found, in order, from:
 
 Usage:
 
-    python tools/build_hsaco.py                  # rebuild all three shipped objects in place
+    python tools/build_hsaco.py                  # rebuild all shipped objects in place
     python tools/build_hsaco.py --out-dir build  # write them elsewhere
     python tools/build_hsaco.py --check          # build to a temp dir and compare with the shipped files
     python tools/build_hsaco.py sk1_t4a1s        # only some kernels
@@ -52,7 +52,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KERNEL_DIR = os.path.join(ROOT, "kernels", "hip")
 PACKAGE_DIR = os.path.join(ROOT, "sageattention", "sk1_backend")
 ARCH = "gfx1201"
-SHIPPED = ("sk1_t4a1", "sk1_t4a1s", "sk1_t4a1n")
+SHIPPED = ("sk1_t4a1", "sk1_t4a1s", "sk1_t4a1n", "sk1_t6i", "sk1_t6in", "sk1_t4a1sb", "sk1_t4a1nb",
+           "sk1_d64")
 
 
 def exe(name):

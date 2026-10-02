@@ -36,7 +36,7 @@ BUILD_ARCH = "gfx1201"
 BUILD_PYTHON = "3.12.10"
 BUILD_GLIBCXX_USE_CXX11_ABI = True
 BUILD_MSVC = "14.50.35717"
-BUILD_ID = "sageattention-gfx12/2.2.0+amd.gfx12.1"
+BUILD_ID = "sageattention-gfx12/2.2.0+amd.gfx12.2"
 
 # The two extension modules that must be present for a complete install.
 _REQUIRED_EXTENSIONS = ("_qattn_gfx12_native", "_fused")

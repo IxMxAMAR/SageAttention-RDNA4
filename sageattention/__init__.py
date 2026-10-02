@@ -33,7 +33,7 @@ from .core import sageattn_qk_int8_pv_fp8_cuda_sm90  # noqa: E402
 from .core import sageattn_qk_int8_pv_gfx12_native  # noqa: E402
 from .core import GFX12_NATIVE_ENABLED  # noqa: E402
 
-__version__ = "2.2.0+amd.gfx12.1"
+__version__ = "2.2.0+amd.gfx12.2"
 
 __all__ = [
     "sageattn",

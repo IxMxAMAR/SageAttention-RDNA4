@@ -142,6 +142,48 @@ else:
     SK1_BACKEND = True          # DEFAULT: ON -- the p*amax_v overflow is fixed by sk1_t4a1s.
     SK1_BACKEND_STRICT = False  # ... with a silent fallback everywhere else.  =0 forces it OFF.
 
+#: INT8 Q.K objects, ON by default for fp16 with head_dim 128.
+#:
+#: Unset `SAGEATTN_SK1_INT8` routes the prebuilt SK1 path to the two int8 objects
+#: (`sageattention/sk1_backend/sk1_t6i.gfx1201.hsaco` for contiguous HND,
+#: `sk1_t6in.gfx1201.hsaco` for strided-HND/NHD) and to the int8 prologue, which quantises K per
+#: token to int8 (`scale = max(max|k|,1)/127`, round-to-nearest-even, clamp [-128,127]) instead of
+#: e4m3. Q.K then runs on `v_wmma_i32_16x16x16_iu8` with int32 accumulators. The V / P.V path is the
+#: fp8 one, unchanged. On the accuracy and edge-length test cells the contiguous object was more
+#: accurate than the fp8 kernel on every cell, at a 1.6-2.5 % kernel-only cost.
+#:
+#: `=1` is ON and strict: a call the int8 path cannot serve raises. `=0` is the fp8 behaviour, bit
+#: for bit. Unset is ON with a normal fallback: a call int8 cannot serve goes to the fp8 SK1
+#: objects, and only if those cannot serve it either does the caller continue to its PR #368 path.
+#: `SAGEATTN_SK1_BACKEND=0` wins over `=1` (no SK1 at all). `head_dim == 64` and every bf16 call are
+#: not served by int8 (the objects are fp16-Q/O, D=128 only); there is no int8 bf16 object.
+_sk1_i8_env = os.environ.get("SAGEATTN_SK1_INT8", "").strip().lower()
+if _sk1_i8_env in ("1", "true", "yes", "on"):
+    SK1_INT8 = True             # forced ON
+    SK1_INT8_STRICT = True      # ... and a failure of the int8 path raises
+elif _sk1_i8_env in ("0", "false", "no", "off"):
+    SK1_INT8 = False
+    SK1_INT8_STRICT = False
+else:
+    SK1_INT8 = True             # DEFAULT: ON -- int8 Q.K, with a NORMAL fallback
+    SK1_INT8_STRICT = False     # ... so a call int8 cannot serve still gets served
+
+#: The BF16 Q/O objects. `SAGEATTN_SK1_BF16=1` routes a bf16 call to `sk1_t4a1sb.gfx1201.hsaco`
+#: (contiguous HND) or `sk1_t4a1nb.gfx1201.hsaco` (strided-HND/NHD), which are the same kernel
+#: source as the fp16 pair with the Q/O element type as a template parameter
+#: (`kernels/hip/sk1_t4a1sb.hip`). bf16 K/V go through the same fused Triton prologue kernels, because
+#: every load widens to fp32 exactly, so the fp8 bytes and the fp32 scales are the fp16 ones on the
+#: same values. `=1` is ON and strict; `=0` forces OFF.
+#:
+#: There is deliberately no `SK1_BF16` constant in this module: `sageattn` forwards `sk1_bf16`
+#: straight through (defaulting to `None`), and `try_sk1_t1` resolves `None` from the backend's own
+#: `SK1_BF16`. That keeps the single default switch, `SK1_BF16_DEFAULT_ON` in
+#: `sageattention/sk1_backend/__init__.py`, in one place, and keeps the lazy
+#: `from .sk1_backend import try_sk1_t1` (with its `except ImportError` fallback) intact, which a
+#: module-level import here would break. The default is on, so an unset env serves a bf16 call with
+#: the bf16 objects. `head_dim == 64` is a clean refusal (`bf16_d128_only`): both bf16 objects are
+#: D=128.
+
 from typing import Any, List, Literal, Optional, Tuple, Union
 import warnings
 
@@ -1001,6 +1043,8 @@ def sageattn(
     sm_scale: Optional[float] = None,
     return_lse: bool = False,
     sk1_backend: Optional[bool] = None,
+    sk1_int8: Optional[bool] = None,
+    sk1_bf16: Optional[bool] = None,
     **kwargs: Any,
 ):
     """
@@ -1074,6 +1118,31 @@ def sageattn(
         on (and makes a load failure raise); ``=0`` forces it off.  An explicit
         ``sk1_backend=True`` forces on (raises on a load failure) and ``sk1_backend=False`` forces
         off.  See ``sageattention/sk1_backend/__init__.py``.
+
+    sk1_int8 : Optional[bool]
+        Run the prebuilt SK1 path with INT8 Q.K instead of fp8 Q.K.  Default ON.  ``None`` reads
+        the backend's default switch ``SK1_INT8_DEFAULT_ON`` (``True``) with a normal fallback: a
+        call the int8 objects cannot serve goes to the fp8 SK1 objects, and only if those cannot
+        serve it either does the shipped PR #368 path take over.  ``SAGEATTN_SK1_INT8=0`` (or
+        ``sk1_int8=False``) restores the fp8 behaviour bit for bit; ``SAGEATTN_SK1_INT8=1`` (or
+        ``sk1_int8=True``) forces int8 and is strict -- a call int8 cannot serve raises.  Only
+        meaningful when the SK1 backend is on; ``SAGEATTN_SK1_BACKEND=0`` wins and no SK1 object is
+        used at all.  The int8 objects are fp16-Q/O and ``head_dim == 128`` only, so a D=64 call and
+        every bf16 call are not served by int8 (there is no int8 bf16 object); with the default
+        switch they fall back normally, with the strict switch they raise.
+
+    sk1_bf16 : Optional[bool]
+        Serve a bf16 call with the bf16 SK1 objects.  Default ON.  ``None`` reads the backend's
+        module-level ``SK1_BF16``, whose unset default is ``SK1_BF16_DEFAULT_ON`` (``True``), so an
+        unset env serves a bf16 call with the bf16 objects and falls back normally -- fp8 SK1 first,
+        then PR #368 -- for a call they cannot serve.  ``SAGEATTN_SK1_BF16=0`` forces OFF: a bf16
+        call then falls back with reason ``"dtype"``.  ``=1`` is ON and strict (a call the bf16 path
+        cannot serve raises).  ``sk1_bf16=True`` forces it for this call (strict); ``False`` forces
+        the fallback.  Only meaningful when the SK1 backend is on; ``SAGEATTN_SK1_BACKEND=0`` wins
+        and no SK1 object is used at all.  The bf16 objects exist for ``head_dim == 128`` only -- a
+        D=64 call with bf16 on is refused (``bf16_d128_only``).  The fp16 path is untouched: the
+        bf16 objects are the same kernel source with the Q/O element type templated, and the fp16
+        instantiation in them is instruction-identical to the shipped object.
     """
         
     arch = get_cuda_arch_versions()[q.device.index]
@@ -1108,6 +1177,17 @@ def sageattn(
             _sk1_want, _sk1_strict = SK1_BACKEND, SK1_BACKEND_STRICT
         else:
             _sk1_want, _sk1_strict = bool(sk1_backend), bool(sk1_backend)
+        # The int8 switch is passed straight through: `None` lets `try_sk1_t1` resolve it from the
+        # backend's `SK1_INT8` / `SK1_INT8_DEFAULT_ON`, which is the only way the default can be
+        # "ON, non-strict". Collapsing it to a bool here would make every default call `int8=True`,
+        # and `try_sk1_t1` treats an explicit `int8=True` as strict (a call int8 cannot serve would
+        # raise instead of falling back to the fp8 SK1 objects and then to PR #368).
+        # `sk1_int8=False` restores the fp8 behaviour for that call.
+        _sk1_i8 = None if sk1_int8 is None else bool(sk1_int8)
+        # The bf16 switch is likewise separate and passed straight through: `None` lets
+        # `try_sk1_t1` resolve it from the backend's `SK1_BF16`. `sk1_bf16=True` is strict for the
+        # bf16 path inside `try_sk1_t1` (which is what `SAGEATTN_SK1_BF16=1` must mean); with it off
+        # a bf16 call is refused with reason `"dtype"`.
         if _sk1_want and tensor_layout in ("HND", "NHD") and not return_lse:
             try:
                 from .sk1_backend import try_sk1_t1 as _try_sk1
@@ -1122,6 +1202,8 @@ def sageattn(
                     smooth_v=bool(kwargs.get("smooth_v", False)),
                     attn_mask=kwargs.get("attn_mask", None),
                     strict=_sk1_strict,
+                    int8=_sk1_i8,
+                    bf16=sk1_bf16,
                 )
                 if _sk1_out is not None:
                     return _sk1_out

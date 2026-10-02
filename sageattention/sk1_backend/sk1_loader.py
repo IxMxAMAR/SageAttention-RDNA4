@@ -259,10 +259,16 @@ def _strided_triple(t, name):
 class Sk1Attn:
     """SK1's two entry points behind a torch-tensor interface.
 
-    Tensor contract (exactly the kernel's):  Q (B*H, N, 128) fp16 RAW; K8 (B*H, N_pad, 128) e4m3
-    zero-padded; SK (B*H, N_pad) fp32; V8T (B*H, 128, N_pad) e4m3 zero-padded (V TRANSPOSED);
-    SV (B*H, N_pad) fp32; VMEAN (B*H, 128) fp32 or None; O (B*H, N, 128) fp16.
+    Tensor contract (exactly the kernel's):  Q (B*H, N, 128) fp16 or bf16 RAW; K8 (B*H, N_pad, 128)
+    e4m3 zero-padded; SK (B*H, N_pad) fp32; V8T (B*H, 128, N_pad) e4m3 zero-padded (V TRANSPOSED);
+    SV (B*H, N_pad) fp32; VMEAN (B*H, 128) fp32 or None; O (B*H, N, 128) the same 16-bit dtype as Q.
     `H` is the head count used to fold (b, h) out of `bh`; N_pad must be a multiple of 64.
+
+    `qo_dtype` is the Q/O element dtype this object was built for. It defaults from the symbol pair
+    (`sk1t4a1sb`/`sk1t4a1nb` -> `torch.bfloat16`, everything else -> `torch.float16`), so the dtype
+    contract is per object: the fp16 objects refuse a bf16 call and the bf16 objects refuse an fp16
+    one. `__bf16` and `_Float16` are both 16 bits wide, so the vector load, the addresses and the
+    whole KV loop are identical; only the widen and the narrow differ.
 
     The `sk1_t4a1s` object takes a 12th argument, `S` (B*H,) fp32: the per-`(b,h)` rescale
     `S = clamp_min(max_j sv(j), 1)` that the prologue applied to `SV`. It is inserted between `VMEAN`
@@ -290,10 +296,19 @@ class Sk1Attn:
                          "q_rs", "q_hs", "q_bs", "o_rs", "o_hs", "o_bs")
 
     def __init__(self, hsaco_path: str, rt: HipRuntime | None = None, symbols=None, with_s=None,
-                 strided=None):
+                 strided=None, head_dim=None, bm=None, qo_dtype=None):
         """`symbols` = (non-causal, causal) entry points.  The packaged default is the `sk1_t4a1`
         variant's pair (`sk1t4a1_attn_fwd_c0/_c1`); the `_check` contract guard runs before every
-        launch.  `with_s` selects the 12-argument form (see the class doc)."""
+        launch.  `with_s` selects the 12-argument form (see the class doc).
+
+        `head_dim` (64 or 128) and `bm` (128 or 256) both default from the symbol pair, for the same
+        reason `with_s`/`strided` do: a caller that only swaps `symbols` must not be able to launch a
+        D=64 kernel against D=128 buffers, nor a BM=256 kernel with a BM=128 grid.
+
+        `qo_dtype` likewise defaults from the symbol pair, so a caller that only swaps `symbols`
+        cannot feed a bf16 object an fp16 Q (or the reverse), which would silently reinterpret the
+        bytes.
+        """
         self.rt = rt or HipRuntime()
         self.hsaco_path = hsaco_path
         self.symbols = tuple(symbols) if symbols else self.DEFAULT_SYMBOLS
@@ -306,21 +321,45 @@ class Sk1Attn:
         # only swaps `symbols` cannot launch the 18-argument kernel with 12 arguments.
         self.strided = (any("t4a1n" in s for s in self.symbols) if strided is None
                         else bool(strided))
+        # Head dim and query-tile height, likewise inferred from the symbol pair.
+        inferred_d = 64 if any("d64" in s for s in self.symbols) else 128
+        self.head_dim = int(inferred_d if head_dim is None else head_dim)
+        if self.head_dim not in (64, 128):
+            raise ValueError("head_dim must be 64 or 128; got %d" % self.head_dim)
+        inferred_bm = 256 if any("d64m" in s for s in self.symbols) else 128
+        self.bm = int(inferred_bm if bm is None else bm)
+        if self.bm not in (128, 256):
+            raise ValueError("bm must be 128 or 256; got %d" % self.bm)
+        # The Q/O element dtype, inferred from the symbol pair.
+        if qo_dtype is None:
+            import torch
+            qo_dtype = (torch.bfloat16 if any(("t4a1sb" in s) or ("t4a1nb" in s)
+                                              for s in self.symbols) else torch.float16)
+        self.qo_dtype = qo_dtype
         self.module = self.rt.load_module(hsaco_path)
         self.funcs = {sym: self.rt.get_function(self.module, sym) for sym in self.symbols}
         self._keep = None
 
     @staticmethod
-    def _check(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=None, with_s=False):
+    def _check(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=None, with_s=False, head_dim=128,
+               qo_dtype=None):
         # The launch is raw: nothing downstream bounds-checks, and an undersized buffer is a GPU page
         # fault (Windows shows an AMD bug-report popup). Refuse any tensor that does not match the
         # contract exactly, before it reaches the device.
         import torch
+        # The object's Q/O element dtype. The fp16 default keeps every earlier caller unchanged; a
+        # bf16 object passes `torch.bfloat16` and then refuses an fp16 q/out (and vice versa).
+        qo_dtype = torch.float16 if qo_dtype is None else qo_dtype
         # This must come first. A null `S` on the 12-argument object is dereferenced by the kernel's
         # `Sb = S[bh]` load, so it is refused before any other tensor is inspected.
         if with_s and s is None:
             raise ValueError("this SK1 object takes the per-head V scale `S` argument; s=None was passed")
         N, N_pad, H = int(N), int(N_pad), int(H)
+        head_dim = int(head_dim)
+        if head_dim not in (64, 128):
+            # The object's own head dim, not the caller's. A D=64 object must refuse a D=128 call
+            # and vice versa, so the shape check below is against this object's contract.
+            raise ValueError("SK1 objects exist only for head_dim in {64,128}; got %d" % head_dim)
         if N < 1 or N_pad % 64 or N_pad < N:
             # `% 64` must be escaped: unescaped, Python parses it as a format spec and raises
             # `ValueError: unsupported format character` instead of this message.
@@ -328,15 +367,15 @@ class Sk1Attn:
                              % (N, N_pad))
         bh = q.shape[0]
         want = {
-            "q": (q, (bh, N, 128), torch.float16),
-            "k8": (k8, (bh, N_pad, 128), None),
+            "q": (q, (bh, N, head_dim), qo_dtype),
+            "k8": (k8, (bh, N_pad, head_dim), None),
             "sk": (sk, (bh, N_pad), torch.float32),
-            "v8t": (v8t, (bh, 128, N_pad), None),
+            "v8t": (v8t, (bh, head_dim, N_pad), None),
             "sv": (sv, (bh, N_pad), torch.float32),
-            "out": (out, (bh, N, 128), torch.float16),
+            "out": (out, (bh, N, head_dim), qo_dtype),
         }
         if vmean is not None:
-            want["vmean"] = (vmean, (bh, 128), torch.float32)
+            want["vmean"] = (vmean, (bh, head_dim), torch.float32)
         # The 12th kernel argument (already required to be non-None at the top).
         if with_s:
             want["s"] = (s, (bh,), torch.float32)
@@ -353,18 +392,27 @@ class Sk1Attn:
                 raise ValueError("%s is on %s, q is on %s" % (name, t.device, q.device))
 
     @staticmethod
-    def _check_strided(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=None):
+    def _check_strided(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=None, head_dim=128,
+                       qo_dtype=None):
         """`_check` for the 18-argument object.
 
         Same contract as `_check`, except that `q` and `out` are logical `(B, H, N, D)` tensors that
         may be strided.  Their `(row, head, batch)` strides must be one of the two legal patterns
         (`_strided_triple`); `K8`/`SK`/`V8T`/`SV`/`VMEAN`/`S` must still be contiguous.  Returns
         `(q_triple, o_triple)` for `launch_strided`.
+
+        `head_dim` is the object's head dim (64 or 128), not the caller's; a D=64 object refuses a
+        D=128 call and vice versa.
         """
         import torch
+        # The object's Q/O element dtype (see `_check`).
+        qo_dtype = torch.float16 if qo_dtype is None else qo_dtype
         if s is None:
             raise ValueError("this SK1 object takes the per-head V scale `S` argument; s=None was passed")
         N, N_pad, H = int(N), int(N_pad), int(H)
+        head_dim = int(head_dim)
+        if head_dim not in (64, 128):
+            raise ValueError("SK1 objects exist only for head_dim in {64,128}; got %d" % head_dim)
         if N < 1 or N_pad % 64 or N_pad < N:
             raise ValueError("need N >= 1, N_pad %% 64 == 0 and N_pad >= N (N=%d, N_pad=%d)"
                              % (N, N_pad))
@@ -373,8 +421,11 @@ class Sk1Attn:
         B, Hq, Nq, Dq = (int(x) for x in q.shape)
         if Hq != H:
             raise ValueError("q.shape[1]=%d != H=%d" % (Hq, H))
-        if (Nq, Dq) != (N, 128):
-            raise ValueError("q is %s, expected (B,%d,%d,128)" % (tuple(q.shape), H, N))
+        if (Nq, Dq) != (N, head_dim):
+            raise ValueError("q is %s, expected (B,%d,%d,%d)" % (tuple(q.shape), H, N, head_dim))
+        if tuple(out.shape) != (B, H, N, head_dim):
+            raise ValueError("out is %s, expected (B,%d,%d,%d)"
+                             % (tuple(out.shape), H, N, head_dim))
         bh = B * H
         qtr = _strided_triple(q, "q")
         otr = _strided_triple(out, "out")
@@ -390,11 +441,11 @@ class Sk1Attn:
         if q.data_ptr() % 16:
             raise ValueError("q.data_ptr()=0x%x is not 16-byte aligned" % q.data_ptr())
         want = (
-            ("q", q, (B, H, N, 128), torch.float16, False),
-            ("out", out, (B, H, N, 128), torch.float16, False),
-            ("k8", k8, (bh, N_pad, 128), None, True),
+            ("q", q, (B, H, N, head_dim), qo_dtype, False),
+            ("out", out, (B, H, N, head_dim), qo_dtype, False),
+            ("k8", k8, (bh, N_pad, head_dim), None, True),
             ("sk", sk, (bh, N_pad), torch.float32, True),
-            ("v8t", v8t, (bh, 128, N_pad), None, True),
+            ("v8t", v8t, (bh, head_dim, N_pad), None, True),
             ("sv", sv, (bh, N_pad), torch.float32, True),
         )
         for name, t, shape, dtype, need_contig in want:
@@ -411,9 +462,9 @@ class Sk1Attn:
             if need_contig and not t.is_contiguous():
                 raise ValueError("%s must be a contiguous device tensor" % name)
         if vmean is not None:
-            if tuple(vmean.shape) != (bh, 128) or vmean.dtype != torch.float32:
-                raise ValueError("vmean must be (%d,128) fp32; got %s %s"
-                                 % (bh, tuple(vmean.shape), vmean.dtype))
+            if tuple(vmean.shape) != (bh, head_dim) or vmean.dtype != torch.float32:
+                raise ValueError("vmean must be (%d,%d) fp32; got %s %s"
+                                 % (bh, head_dim, tuple(vmean.shape), vmean.dtype))
             if not vmean.is_cuda or not vmean.is_contiguous() or vmean.device != q.device:
                 raise ValueError("vmean must be a contiguous device tensor on q's device")
         if tuple(s.shape) != (bh,) or s.dtype != torch.float32:
@@ -424,7 +475,8 @@ class Sk1Attn:
 
     def launch(self, q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, sm_scale, causal,
                stream=None, s=None):
-        self._check(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=s, with_s=self.with_s)
+        self._check(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=s, with_s=self.with_s,
+                    head_dim=self.head_dim, qo_dtype=self.qo_dtype)
         c = ctypes
         args = [c.c_void_p(q.data_ptr()), c.c_void_p(k8.data_ptr()), c.c_void_p(sk.data_ptr()),
                 c.c_void_p(v8t.data_ptr()), c.c_void_p(sv.data_ptr()),
@@ -439,11 +491,15 @@ class Sk1Attn:
         B = int(bh) // int(H)
         if B * int(H) != int(bh):
             raise ValueError("q.shape[0]=%d is not H=%d times an integer batch size" % (bh, H))
-        # grid = (ceil(N/128), H, B); the kernel folds bh = blockIdx.z*H + blockIdx.y
-        grid = ((N + 127) // 128, int(H), B)
+        # grid = (ceil(N/bm), H, B); the kernel folds bh = blockIdx.z*H + blockIdx.y.  bm is the
+        # object's query-tile height (128 for most objects, 256 for the `d64m` arm), and the block is
+        # 4 warps x 32 lanes x (bm/128): 256 threads at bm=128, 512 at bm=256.
+        bm = int(self.bm)
+        grid = ((N + bm - 1) // bm, int(H), B)
+        block = (bm * 2, 1, 1)
         st = torch_stream() if stream is None else int(stream)
         self._keep = self.rt.launch(self.funcs[self.symbols[1] if causal else self.symbols[0]],
-                                    grid, (256, 1, 1), 0, st, args)
+                                    grid, block, 0, st, args)
         return out
 
     def launch_strided(self, q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, sm_scale, causal,
@@ -456,7 +512,8 @@ class Sk1Attn:
         if not self.strided:
             raise ValueError("this SK1 object is not the strided form (symbols=%r)"
                              % (self.symbols,))
-        qtr, otr = self._check_strided(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=s)
+        qtr, otr = self._check_strided(q, k8, sk, v8t, sv, vmean, out, H, N, N_pad, s=s,
+                                       head_dim=self.head_dim, qo_dtype=self.qo_dtype)
         c = ctypes
         args = [c.c_void_p(q.data_ptr()), c.c_void_p(k8.data_ptr()), c.c_void_p(sk.data_ptr()),
                 c.c_void_p(v8t.data_ptr()), c.c_void_p(sv.data_ptr()),
@@ -468,11 +525,14 @@ class Sk1Attn:
                  c.c_int(int(qtr[0])), c.c_int(int(qtr[1])), c.c_int(int(qtr[2])),
                  c.c_int(int(otr[0])), c.c_int(int(otr[1])), c.c_int(int(otr[2]))]
         B = int(q.shape[0])
-        # grid = (ceil(N/128), H, B); the kernel folds bh = blockIdx.z*H + blockIdx.y
-        grid = ((N + 127) // 128, int(H), B)
+        # grid = (ceil(N/bm), H, B); the kernel folds bh = blockIdx.z*H + blockIdx.y.  bm is the
+        # object's query-tile height (128 for most objects, 256 for the `d64m` arm).
+        bm = int(self.bm)
+        grid = ((N + bm - 1) // bm, int(H), B)
+        block = (bm * 2, 1, 1)
         st = torch_stream() if stream is None else int(stream)
         self._keep = self.rt.launch(self.funcs[self.symbols[1] if causal else self.symbols[0]],
-                                    grid, (256, 1, 1), 0, st, args)
+                                    grid, block, 0, st, args)
         return out
 
 

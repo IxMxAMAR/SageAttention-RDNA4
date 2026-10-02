@@ -193,12 +193,47 @@ per step than PyTorch SDPA, and 2.4 % and 5.0 % faster than SageAttention 1.x. I
 also closer to full-precision attention than SageAttention 1.x's. The final change widened the
 kernel's input envelope to strided and NHD inputs, which is what video models such as Wan send.
 
-## 9. What is next
+## 9. int8, bf16 and new defaults
 
-- **int8 Q·K with per-token scales.** int8 and fp8 matrix instructions turned out to run at the same
-  rate on this chip, and a first int8 kernel is built. It is more accurate than the shipped fp8
-  kernel on every test cell, about 2 % slower, and not shipped yet (F154).
-- **The overlap probe and `s_setprio`.** Both are cheap experiments that decide whether the
-  structural rewrite is worth building.
-- **head_dim 64,** for older model families.
-- **bf16 inputs,** so bf16 models get the kernel too.
+Two things had been waiting since the kernel first shipped.
+
+The first was int8 Q·K. On this chip the int8 and fp8 matrix instructions run at the same rate, so
+int8 costs nothing in the matrix work, and with one scale per token it is more precise than fp8.
+Across ten real captures it beat per-token fp8 on nine and PR #368 on all ten (F154). Inside a
+real render it served every call, its per-call error was 0.82× the fp8 kernel's, and the step time
+did not change (F157). The kernel alone is about 2.5 % slower. Its prologue quantizes only K and V,
+which pays that back at image sizes but not quite at video lengths: at 47k tokens the call is 1.7 %
+slower. The precision was worth that, so int8 became the default for fp16, with the fp8 kernel one
+environment variable away (F159).
+
+The second was bf16. Many models run in bf16, and until now every one of their calls fell back to
+PR #368. The bf16 kernels come from the same source as the fp16 ones, templated on the dtype, and
+the fp16 objects stayed byte for byte as they were. They run 1.3× to 2.2× faster than PR #368's
+bf16 path (F158). They were held back once: on the most extreme outlier inputs, some cells came
+out non-finite. A closer look showed those were inputs where exact fp32 attention overflows too.
+The rule was restated before the rerun as "no worse than exact fp32 attention", the kernel passed
+it, and bf16 went on by default (F159).
+
+Memory showed up again. PR #368's bf16 path measured almost twice as slow in one run as in another,
+with the same code. The difference was how full the GPU's memory was during the run: under
+pressure its allocator thrashes, while the hand-written kernel's time did not move. A baseline has
+to be measured in the same memory state as whatever it is compared with.
+
+Not everything worked:
+
+- **head_dim 64.** A port of the D=128 kernel built clean and was bit-exact across its variants,
+  but even the variants that reached higher occupancy ran 1.55–2.7× slower than PR #368's D=64
+  kernel. It is not used (F156).
+- **The overlap rewrite.** Three cheap probes were meant to decide whether overlapping one tile's
+  matrix work with another tile's softmax was worth building. The main probe could not be built as
+  a fair comparison, because the compiler's own wait instructions change with the schedule. The
+  other two showed that barriers are cheap here (0.6–0.9 %) and that `s_setprio` costs time
+  instead of saving it. The rewrite was not started (F155).
+
+## 10. What is next
+
+- **Video models end to end.** The kernels now accept what video models send (strided and NHD
+  layouts, bf16), but every end-to-end test so far used image models.
+- **Per-call overhead.** At the tiny text-fusion shapes, launch and quantization cost more than the
+  attention itself (F153). It is at most 0.17 ms a call, but there are many such calls.
+- **head_dim 64** needs its own design rather than a port of the D=128 kernel.

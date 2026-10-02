@@ -4,7 +4,7 @@ There are two independent build products:
 
 1. **The Python package and its two native extensions** (`_qattn_gfx12_native`, `_fused`). These
    come from `csrc/`, the gfx12 port from PR #368, and are built by `setup.py`.
-2. **The hand-written kernel's code objects** (`sageattention/sk1_backend/*.hsaco`), built from
+2. **The hand-written kernels' code objects** (`sageattention/sk1_backend/*.hsaco`), built from
    `kernels/hip/` by `tools/build_hsaco.py`. They ship prebuilt in the repo, so you only need this
    step if you change a kernel.
 
@@ -44,7 +44,7 @@ python setup.py --no-build-ext bdist_wheel
 ## 2. The kernel code objects
 
 ```
-python tools/build_hsaco.py            # rebuild the three shipped objects in place
+python tools/build_hsaco.py            # rebuild all shipped objects in place
 python tools/build_hsaco.py --check    # build to a temp dir and compare with the shipped files
 ```
 
@@ -69,9 +69,11 @@ python bench/bench_attention.py        # default vs hand-written kernel off vs P
 Run the tests from outside the checkout, or with the installed package first on `PYTHONPATH`. The
 checkout's own `sageattention/` has no compiled extensions and would shadow the installed one.
 
-The tests cover:
+The tests cover, in fp16 and bf16:
 - agreement with PyTorch SDPA;
 - 36 edge-length cells: N from 1 to 1000, causal and non-causal, `smooth_k` on and off;
 - a key with |V| = 20 000;
 - NHD input bit-identical to HND;
-- the kernel switched off via `SAGEATTN_SK1_BACKEND=0`.
+- int8 Q·K as the fp16 default, and `SAGEATTN_SK1_INT8=0` giving the fp8 kernel bit for bit;
+- the kernels switched off via `SAGEATTN_SK1_BACKEND=0` or `SAGEATTN_SK1_BF16=0`;
+- head_dim 64 falling back to PR #368's kernel.

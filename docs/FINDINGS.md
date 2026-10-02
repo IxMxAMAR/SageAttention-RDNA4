@@ -7,7 +7,7 @@ The work went through four phases.
 1. **A Triton fp8 kernel.** The gap to PR #368 was diagnosed, levers were tried and closed, accuracy work was done (per-token fp8 scaling, `smooth_k`, `smooth_v`), and correctness bugs were found and fixed.
 2. **Attempts to hand-edit Triton's compiled output.**
 3. **A hand-written HIP kernel, SK1, and its variants.** `sk1_t1` (one softmax rescale per 64 keys) and `sk1_t4a1` (mask and skip work guarded by one branch) were wins; many other variants were refuted.
-4. **Shipping.** Packaging behind a flag, then default-on with fallback; a real-world fp8 overflow found when a render went black, and its fix; end-to-end tests in a diffusion model; widening the input envelope.
+4. **Shipping.** Packaging behind a flag, then default-on with fallback; a real-world fp8 overflow found when a render went black, and its fix; end-to-end tests in a diffusion model; widening the input envelope; then int8 Q·K and bf16 kernels, made the defaults in v0.2.0.
 
 ## How to read an entry
 
@@ -1364,7 +1364,23 @@ A hand-written HIP kernel, SK1, designed from what the Triton work had learned. 
 
 **Result.** PR #368's source quantizes Q to int8 inside the kernel, with one scale per 32 rows. The fp32 re-implementation behind F058 left Q unquantized, which made PR #368 look more precise than it is. With Q quantized, PR #368 still beats per-token fp8 on the calm layers, now by 3.3–6.4×, and still loses by 4.8–200× on Krea2's first block. Per-token int8 Q·K with `smooth_k` beats per-token fp8 on 9 of 10 captures and the corrected PR #368 model on all 10. On this card the int8 and fp8 matrix instructions run at the same rate (27 cycles dependent latency for both). The int8 variant of the shipped kernel (`sk1_t6i`) is more accurate than the shipped fp8 kernel on every test cell: error ratio 0.59–0.91 on real captures, 0.97–0.98 on the reference cells, at most 1.0 on all 112 edge cells. It has no non-finite output up to the fp16 maximum and is 1.6–2.5 % slower (kernel-only, against a 3 % bar).
 
-**Status:** confirmed. Not shipped yet; the shipped default is still the fp8 kernel.
+**Status:** confirmed. Shipped as an opt-in switch first (F157), then as the default (F159).
+
+### F155 — Cheap probes before an overlap rewrite <sub>(track H25)</sub>
+
+**Question.** A design study predicted +3–8 % from restructuring the kernel so that one tile's matrix work overlaps another tile's softmax. Before building it, can three cheap probes show whether it is worth it: moving one instruction group with the work held fixed, adding a barrier mid-iteration, and raising wave priority with `s_setprio` around the loads?
+
+**Result.** The first probe could not be built as a fair A/B. In both constructions tried, the wait and stall instructions the compiler emits changed with the group's position, so the two arms never had the same instruction count, and the probe's own validity check failed before any timing ran. The other two probes ran. One extra barrier pair per loop iteration costs only +0.62 % at N=8771 and +0.94 % at N=47520 (non-causal), with bit-identical output and unchanged register use. That closes the idea of saving time by removing barriers, and it puts the barrier cost of the overlap design at about twice what the design study assumed. `s_setprio` around the load groups costs +0.47 % to +0.96 % in all four cells instead of saving the 2 % the decision rule asked for.
+
+**Status:** closed. The overlap rewrite was not started.
+
+### F156 — A head_dim 64 kernel <sub>(track H26)</sub>
+
+**Question.** Can a port of the D=128 kernel serve head_dim 64, used by older model families, faster than the PR #368 kernel those calls use today?
+
+**Result.** The port builds clean: no spills, half the shared memory of the D=128 kernel, and three variants (two tile sizes, two occupancy targets) that are bit-identical to each other on all 122 accuracy cells and finite on all 288 outlier cells. The D=128 path does not change by a bit. But the default variant used 224 registers where about 176 were predicted, so its occupancy stayed at the D=128 kernel's 6 waves per SIMD. The two variants forced to 8 waves did reach 176 registers, and still every variant was 1.55–2.7× slower than PR #368's D=64 path at the timed shapes. It also misses the accuracy bar at 5 of 112 edge cells (the shipped D=128 kernel misses at 8 of 122 cells of the same set).
+
+**Status:** refuted. The object is built and packaged, but nothing routes to it; head_dim 64 keeps using PR #368's kernel.
 
 ## 14. Packaging, shipping and end to end
 
@@ -1417,3 +1433,47 @@ Packaging SK1 behind a flag, promoting it to default-on with automatic fallback,
 **Result.** All frozen gates pass: bit-identity on 184 of 184 cells, 181 of 181 on the unmodified H21 test and 288 of 288 outlier-sweep cells with 0 non-finite. The timing gate (widened/H21 ratio on inputs already served, bar 1.005) failed on its first run (1.0153 / 1.0076 / 1.0004) and passed on one disclosed stricter re-run (1.0011 / 1.0030 / 1.0003). The widened kernel takes 0.584 to 0.858 of the native fallback's time at NHD production shapes (N ≥ 8771) and is 1.13× to 5.1× slower at the tiny text-fusion shapes (at most 0.17 ms per call). In Krea2 end to end SK1 now serves 4 992 of 4 992 attention calls (it was 4 368), and median step time changes by +0.41% at 1 MP and −0.02% at 2 MP.
 
 **Status:** shipped (the widened kernel is built into the wheel and stays default-on).
+
+### F157 — int8 Q·K in a real render <sub>(track H27)</sub>
+
+**Question.** Behind an opt-in switch, how does the int8 Q·K kernel (F154) compare with the fp8 kernel inside a real render, in speed and in precision?
+
+**Result.** Krea2 int8 fine-tune in fp16, 1 MP and 2 MP, 8 steps, 3 prompts × 3 seeds, all arms in one process. Step time int8/fp8 is 0.9970 at 1 MP and 0.9995 at 2 MP. A same-binary A/A twin moved 0.37 %, so this supports "not slower", not "faster". The kernel alone is 2.8 % slower at N=4118. The int8 path's prologue quantizes only K and V and skips a Q pass that the fp8 path's prologue runs, which pays the kernel cost back. Per call, against an fp64 reference on six attention calls captured from the renders, int8's RMS error is 0.77–0.90 of fp8's (geometric mean 0.82). In the final latents, int8 differs from fp8 about as much as fp8 differs from SDPA (ratio 0.998 at 1 MP, 0.970 at 2 MP), so the prediction that int8 would barely move the image was wrong. int8's renders are slightly closer to SDPA's than fp8's at both resolutions. The kernel served 4 992 of 4 992 attention calls in each arm.
+
+**Status:** confirmed. Shipped as an opt-in switch, then made the default (F159).
+
+### F158 — bf16 inputs <sub>(track H28)</sub>
+
+**Question.** Can the kernel take bf16 inputs, so that bf16 models stop falling back to PR #368's path, without touching the fp16 code objects?
+
+**Result.** One dtype-templated source per layout produces the bf16 kernels: Q is read raw, K and V are quantized to fp8 per token by the fused prologue, and the output is written in bf16. The fp16 objects are byte-unchanged. The bf16 kernels use exactly the fp16 register count (224, no spills), and their error is within 2.4 % of the fp16 kernel's on all 179 accuracy cells (worst ratio 1.024). End to end, Krea2 Turbo with bf16 compute (fp8-scaled weights) at 1 MP and 2 MP:
+
+| | step time vs SDPA | latent error vs SDPA | image PSNR vs SDPA |
+|---|---|---|---|
+| SageAttention 1.x | 0.963 / 0.908 | 0.59 / 0.57 | 15.0 / 15.0 dB |
+| bf16 kernel | 0.931 / 0.858 | 0.20 / 0.36 | 23.0 / 18.7 dB |
+
+The kernel served 4 992 of 4 992 calls. It was not made the default at the time, for two reasons. On the most extreme outlier set, 12 of 32 cells came out non-finite, which the pre-registered rule forbade. And one timing block was void because its A/A twin moved 5.4 %.
+
+**Status:** confirmed. Shipped opt-in, then made the default (F159), once the outlier cells were shown to overflow exact fp32 attention as well.
+
+### F159 — int8 Q·K and bf16 on by default <sub>(track H30)</sub>
+
+**Question.** Can int8 Q·K become the default for fp16 and the bf16 kernel the default for bf16, with clean fallback and with the previous path one switch away?
+
+**Result.** For int8, a call the int8 kernel cannot serve falls back to the fp8 kernel and then to PR #368's path, without raising; 13 of 13 fallback triggers behave exactly as before. `SAGEATTN_SK1_INT8=0` restores the fp8 path bit for bit (181 of 181 and 184 of 184 cells), and default calls are bit-identical to a direct int8 launch (12 of 12 cells). Speed against the fp8 default, one process, interleaved, `smooth_k` on:
+
+| N | non-causal | causal |
+|---|---|---|
+| 8771 | 1.000 | 0.983 |
+| 47520 | 1.017 | 1.010 |
+
+The 1.7 % at N=47520 non-causal is real (A/A 0.05 %) and over the 1 % regression bar set in advance. It is recorded, not tuned away.
+
+For bf16, the outlier rule was restated before the re-run as "no worse than exact fp32 attention": per cell, the kernel may not produce more non-finite values than exact fp32 attention on the same inputs, and must be finite wherever fp32 is. All 32 cells pass. Against PR #368's bf16 path with `smooth_k` on, the kernel takes 0.758 / 0.442 of its time at N=8771 non-causal / causal and 0.770 / 0.448 at N=47520; against the fp16 kernel it is 1.000–1.016. One check failed as written: the clock-drift probe's smallest size moved 3.0 % and 3.9 % in two timing blocks, against a 3 % bar. That probe size varies by 7 % between runs on its own, the ratios come from one interleaved process, and a later block in the original four-cell layout passed every check, that probe included (2.4 %). The default was turned on with the failure recorded as a deviation.
+
+Memory pressure changes the baseline. When the timing process held nearly all 16 GB, PR #368's bf16 path slowed by 1.7–1.9× while the bf16 kernel's time did not move. Without that pressure, PR #368's bf16 path runs at the speed of its fp16 path. The ratios above are without it.
+
+Regression after both switches: 179 of 179 accuracy cells within the 1.03 error-ratio bar (worst 1.024); 288 of 288 outlier cells finite with int8 on and off.
+
+**Status:** shipped (v0.2.0).
