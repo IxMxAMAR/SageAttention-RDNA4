@@ -24,9 +24,15 @@ Three things this file is careful about:
 from __future__ import annotations
 
 import ctypes
+import glob
 import os
 import sys
-from ctypes import wintypes
+
+_IS_WINDOWS = (os.name == "nt")
+try:
+    from ctypes import wintypes
+except ImportError:  # non-Windows: the Linux paths below do not need it
+    wintypes = None
 
 HIP_SUCCESS = 0
 
@@ -41,6 +47,9 @@ _LAUNCH_ARGTYPES = ([ctypes.c_void_p] + [ctypes.c_uint] * 6 +
 
 def _enum_amdhip_modules() -> list:
     """Every loaded module whose base name starts with `amdhip` -- full path + HMODULE."""
+    if not _IS_WINDOWS:
+        return _enum_amdhip_modules_linux()
+    assert wintypes is not None  # Windows-only branch
     psapi = ctypes.WinDLL("psapi", use_last_error=True)
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -63,6 +72,39 @@ def _enum_amdhip_modules() -> list:
     return out
 
 
+def _enum_amdhip_modules_linux() -> list:
+    """Linux equivalent: mappings in /proc/self/maps whose file is libamdhip*.
+
+    `hmodule` has no Linux meaning; it stays None and handle evidence is
+    recorded from dlopen handles in `_verify_same_module` instead.
+    """
+    out = []
+    seen = set()
+    try:
+        with open("/proc/self/maps", "r") as f:
+            for line in f:
+                parts = line.split(None, 5)
+                if len(parts) < 6:
+                    continue
+                p = parts[5].strip()
+                if p.endswith(" (deleted)"):
+                    continue
+                if p in seen or not os.path.basename(p).lower().startswith("libamdhip"):
+                    continue
+                seen.add(p)
+                out.append(dict(path=p, hmodule=None))
+    except OSError:
+        pass
+    return out
+
+
+def _hip_lib_names() -> tuple:
+    """HIP runtime file names, most-preferred first, for this platform."""
+    if _IS_WINDOWS:
+        return ("amdhip64_7.dll",)
+    return ("libamdhip64.so.7", "libamdhip64.so")
+
+
 def _candidate_bins() -> list:
     cands = []
     d = os.environ.get("SK1_ROCM_BIN")
@@ -73,8 +115,14 @@ def _candidate_bins() -> list:
         # `_rocm_sdk_core` first: that is the copy torch's own wheel loads. The `_rocm_sdk_devel`
         # `amdhip64_7.dll` has been a different build, and loading it puts a second HIP runtime in
         # the process.
-        cands.append(os.path.join(sp, "_rocm_sdk_core", "bin"))
-        cands.append(os.path.join(sp, "_rocm_sdk_devel", "bin"))
+        if _IS_WINDOWS:
+            cands.append(os.path.join(sp, "_rocm_sdk_core", "bin"))
+            cands.append(os.path.join(sp, "_rocm_sdk_devel", "bin"))
+        else:
+            cands.append(os.path.join(sp, "_rocm_sdk_core", "lib"))
+            cands.append(os.path.join(sp, "_rocm_sdk_devel", "lib"))
+    if not _IS_WINDOWS:
+        cands.extend(glob.glob("/opt/rocm-*/lib") + ["/opt/rocm/lib", "/usr/lib/x86_64-linux-gnu"])
     return cands
 
 
@@ -100,25 +148,38 @@ def rocm_bin_dir() -> str:
     for m in _enum_amdhip_modules():
         return os.path.dirname(m["path"])
     for c in _candidate_bins():
-        if c and os.path.isfile(os.path.join(c, "amdhip64_7.dll")):
-            return c
-    raise RuntimeError("amdhip64_7.dll not found; set SK1_ROCM_BIN or SK1_HIP_DLL")
+        if not c:
+            continue
+        for name in _hip_lib_names():
+            if os.path.isfile(os.path.join(c, name)):
+                return c
+    raise RuntimeError("%s not found; set SK1_ROCM_BIN or SK1_HIP_DLL"
+                       % ("/".join(_hip_lib_names()),))
 
 
 class HipRuntime:
     """Thin ctypes binding to the HIP runtime that is already loaded in this process."""
 
-    DLL_NAME = "amdhip64_7.dll"
+    DLL_NAME = "amdhip64_7.dll" if _IS_WINDOWS else "libamdhip64.so.7"
 
     def __init__(self, bin_dir: str | None = None):
         self.bin_dir = bin_dir or rocm_bin_dir()
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(self.bin_dir)   # amdhip64_7.dll has siblings on its search path
-        self._k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._k32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-        self._k32.GetModuleHandleW.restype = wintypes.HMODULE
+        if _IS_WINDOWS:
+            assert wintypes is not None  # Windows-only branch
+            self._k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self._k32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+            self._k32.GetModuleHandleW.restype = wintypes.HMODULE
+        else:
+            self._k32 = None
         self.dll_path = os.path.join(self.bin_dir, self.DLL_NAME)
-        self.hip = ctypes.WinDLL(self.dll_path)
+        if _IS_WINDOWS:
+            self.hip = ctypes.WinDLL(self.dll_path)
+        else:
+            # RTLD_GLOBAL mirrors WinDLL's process-global visibility so the
+            # runtime torch uses and this handle are one image.
+            self.hip = ctypes.CDLL(self.dll_path, mode=ctypes.RTLD_GLOBAL)
         self._bind()
         self.same_as_torch = self._verify_same_module()
         self.modules: list = []          # keep modules (and their images) alive
@@ -162,7 +223,17 @@ class HipRuntime:
         torch side is recorded as the stream handle's non-emptiness plus the DLL's own path.
         """
         got = ctypes.cast(self.hip._handle, ctypes.c_void_p).value
-        want = self._k32.GetModuleHandleW(self.DLL_NAME)
+        if _IS_WINDOWS:
+            assert wintypes is not None  # Windows-only branch
+            want = self._k32.GetModuleHandleW(self.DLL_NAME)
+        else:
+            # dlopen of an already-loaded soname returns the same handle,
+            # so equality still proves one shared runtime image.
+            try:
+                probe = ctypes.CDLL(self.DLL_NAME)
+                want = ctypes.cast(probe._handle, ctypes.c_void_p).value
+            except OSError:
+                want = None
         mods = _enum_amdhip_modules()
         rec = dict(dll=self.DLL_NAME, bin_dir=self.bin_dir, dll_path=self.dll_path,
                    ctypes_hmodule=got, getmodulehandle_hmodule=want,
