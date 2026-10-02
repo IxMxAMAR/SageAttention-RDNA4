@@ -24,6 +24,7 @@ Three things this file is careful about:
 from __future__ import annotations
 
 import ctypes
+import glob
 import os
 import sys
 
@@ -82,10 +83,12 @@ def _enum_amdhip_modules_linux() -> list:
     try:
         with open("/proc/self/maps", "r") as f:
             for line in f:
-                parts = line.split()
+                parts = line.split(None, 5)
                 if len(parts) < 6:
                     continue
-                p = parts[-1]
+                p = parts[5].strip()
+                if p.endswith(" (deleted)"):
+                    continue
                 if p in seen or not os.path.basename(p).lower().startswith("libamdhip"):
                     continue
                 seen.add(p)
@@ -119,7 +122,7 @@ def _candidate_bins() -> list:
             cands.append(os.path.join(sp, "_rocm_sdk_core", "lib"))
             cands.append(os.path.join(sp, "_rocm_sdk_devel", "lib"))
     if not _IS_WINDOWS:
-        cands.extend(("/opt/rocm/lib", "/opt/rocm-7.2.1/lib", "/usr/lib/x86_64-linux-gnu"))
+        cands.extend(glob.glob("/opt/rocm-*/lib") + ["/opt/rocm/lib", "/usr/lib/x86_64-linux-gnu"])
     return cands
 
 
