@@ -1,6 +1,7 @@
 # SageAttention-RDNA4
 
-Quantized attention for AMD Radeon RX 9070 / RX 9070 XT (RDNA4, `gfx1201`) on Windows.
+Quantized attention for AMD Radeon RX 9070 / RX 9070 XT (RDNA4, `gfx1201`) on Windows, and on Linux
+when built from source.
 
 This is a drop-in build of the `sageattention` package. Underneath it is SageAttention 2.2 and the
 gfx12 port from [SageAttention PR #368](https://github.com/thu-ml/SageAttention/pull/368). On top of
@@ -131,6 +132,15 @@ python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.2-cp312-cp312-win_
 `--no-deps` keeps pip from touching your PyTorch install. The compiled extensions are built
 against that exact PyTorch version. For any other version, build from source (see below).
 
+### Linux
+
+There is no prebuilt Linux wheel, but the kernels load on Linux too, thanks to
+[boxwrench](https://github.com/boxwrench) ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1)). It was tested on a Radeon AI PRO R9700, which is
+also `gfx1201`, under Ubuntu 24.04 with PyTorch `2.9.1+rocm7.2.1`. Build from source with
+`PYTORCH_ROCM_ARCH=gfx1201`. [docs/BUILD.md](docs/BUILD.md) describes the Windows build. The
+package's runtime check expects PyTorch `2.13.0+rocm10.0.0`, the version the Windows wheel is
+built against, so set `SAGEATTENTION_ALLOW_UNVERIFIED_TORCH=1` when you build against any other.
+
 ## Use
 
 ```python
@@ -188,7 +198,8 @@ per process and carries on with the fallback.
 ## Limitations
 
 - The prebuilt kernels target `gfx1201` only. Other GPUs use the fallback path.
-- Tested on Windows only.
+- Every speed and accuracy number here was measured on Windows. On Linux the kernels load and the
+  test suite passes, but nothing has been timed there yet.
 - head_dim 128 only. A head_dim 64 kernel was built and tested, but it was slower than PR #368's,
   so head_dim 64 still uses the fallback (F156).
 - On long sequences (around 47k tokens, non-causal) the int8 default is up to 1.7 % slower per
@@ -204,3 +215,4 @@ Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
   quantized-attention method and the package this builds on.
 - The gfx12 port in [PR #368](https://github.com/thu-ml/SageAttention/pull/368) by DELUXA, which
   provides the native fallback kernels and the baseline this work is measured against.
+- [boxwrench](https://github.com/boxwrench), for Linux support in the kernel loader ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1)).
