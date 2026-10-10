@@ -114,6 +114,19 @@ with care, though. A change of 3·10⁻⁶ in the text conditioning alone moves 
 
 ---
 
+### In a video model (MiniMax-H3, w4a8 int4, 864x480, 124 frames)
+
+H3 fuses q, k and v into one projection, so they arrive as views into a single tensor and `k`'s row
+stride is `3*H*D`, not its own width. Earlier releases refused that layout, which meant the call
+quietly ran PR #368's path even with `SAGEATTN_SK1_BF16=1` set. v0.3 serves it.
+
+The margins are ratios, not milliseconds: this GPU's clock cannot be pinned (see F073), so every
+timing block is ratio-only. End to end in the same workflow, the sampling phase runs at **0.950** of
+PR #368's time at 4 steps and **0.847** at 8 steps, same checkpoint, same seed. Loading dominates the
+wall clock, so the "Prompt executed" totals do not resolve this and are not quoted as a speedup.
+The sweep stops at N = 99 792 because that is where the launch's 32-bit addressing runs out, not
+because the margin does.
+
 ## Install
 
 The prebuilt wheel targets exactly this stack:
@@ -126,7 +139,7 @@ Download the wheel from [Releases](../../releases) and install it into the Pytho
 that runs your models. For ComfyUI that means ComfyUI's own venv. Close ComfyUI first.
 
 ```
-python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.2-cp312-cp312-win_amd64.whl
+python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.3-cp312-cp312-win_amd64.whl
 ```
 
 `--no-deps` keeps pip from touching your PyTorch install. The compiled extensions are built
@@ -213,6 +226,21 @@ per process and carries on with the fallback.
   attention call than the fp8 kernel.
 - End-to-end validation so far is one model family (Krea2), in fp16 and bf16. The kernels
   themselves are checked bit for bit across shapes and layouts, and against an fp64 reference.
+
+## A note from me
+
+I've been busy with my day job and haven't had much time for this. I think the kernel itself could
+still improve, but the returns are marginal now, and most of what is left is Triton and the HIP
+toolchain rather than the attention kernel. If I could, I'd ship this with my own libraries for both
+of them -- but testing and modifying them takes far too long on one GPU.
+
+I've been using DeepSeek V4.1 to summarize my findings and run the tests for me. It has
+been genuinely good at running them across the whole matrix, and the next update will be done the
+same way.
+
+Next up is head_dim 64, which still uses PR #368's kernel today. After that I may patch Triton for
+Windows for my own use case, or send it upstream. Either way it is a while off -- probably a month or
+more.
 
 ## Credits and license
 

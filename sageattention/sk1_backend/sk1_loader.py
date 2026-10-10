@@ -303,28 +303,103 @@ def torch_stream():
     return int(torch.cuda.current_stream().cuda_stream)
 
 
+#: Every reason `strided_view_reason` can return, in evaluation order.  The strings are part of the
+#: refusal contract -- `sk1_backend._envelope_ok` returns them verbatim -- so they are listed once.
+STRIDED_REFUSALS = ("rank", "stride_last", "stride_nonpos", "stride_align", "ptr_align",
+                    "stride_overlap", "stride_int32")
+_INT32_MAX = 2 ** 31 - 1
+
+
+def strided_view_reason(t, name="t"):
+    """`None` if `t` is a servable logical `(B, H, N, D)` view, else a clean reason string.
+
+    This is the one place the acceptance rule lives.  `_strided_triple` (the loader's contract
+    check, which raises) and `sk1_backend._envelope_ok` (the pre-launch refusal, which returns the
+    string) both call it, so the envelope can never accept a pattern the raw launch would refuse,
+    or the reverse.
+
+    Earlier releases accepted only two patterns -- contiguous HND, and the physical-NHD layout --
+    because an arbitrary stride set could alias and the launch is raw.  That whitelist is now
+    replaced by the launch's own requirements, because real models hand this kernel views the
+    whitelist refused: MiniMax-H3's q/k/v are views into one fused `qkv_proj` output, so their row
+    stride is `3*H*D` and neither `is_contiguous()` nor `transpose(1, 2).is_contiguous()` holds.
+    Such a call used to be refused, which meant it silently ran the fallback instead.
+
+    Every condition below is stated from the kernel source:
+
+    1. `rank`            -- not 4-D.
+    2. `stride_last`     -- `t.stride(3) != 1`.  The kernel's only vector access to `Q` is a
+       16-byte `f16x8` load, so the last axis must be the contiguous one.
+    3. `stride_nonpos`   -- any stride <= 0.  A zero stride aliases (`expand`), and the kernel adds
+       `blockIdx.y * q_hstride` / `blockIdx.z * q_bstride` without checking.
+    4. `stride_align`    -- any of the outer three strides not a multiple of 8 elements.  That load
+       is 16 bytes, so every `(b, h, row)` start must be 16-byte aligned.  Required for `Q`;
+       conservative for `K`/`V` (read by the Triton prologue, whose masked loads merely vectorise
+       less) and for `O` (written by scalar 16-bit stores).
+    5. `ptr_align`       -- `t.data_ptr() % 16`.  Same 16-byte load.
+    6. `stride_overlap`  -- the affine index map is not injective.  Test: drop the size-1 dims, sort
+       the rest by ascending stride, and require `stride[k+1] >= stride[k] * size[k]`.  Sufficient
+       but not necessary -- it can refuse a non-overlapping pattern, but it can never accept an
+       overlapping one.  Dropping the size-1 dims is required for correctness: `unsqueeze(0)` gives
+       `B = 1` a batch stride of `H*D`, smaller than the row stride `3*H*D`.
+    7. `stride_int32`    -- any stride above `2**31 - 1`.  The launch passes its addressing as nine
+       32-bit arguments and the prologue as six more.  Not covered: Triton computes element offsets
+       in int32, so a stride whose product with `N` overflows would wrap inside the prologue even
+       though each argument fits.  Nothing in this repository reaches that today.
+    """
+    if t.dim() != 4:
+        return "rank"
+    if int(t.stride(3)) != 1:
+        return "stride_last"
+    st = [int(s) for s in t.stride()]
+    if any(s <= 0 for s in st):
+        return "stride_nonpos"
+    # `stride(3) == 1` is required by (2), so it is excluded here: the rule is the outer three.
+    if any(st[i] % 8 for i in (0, 1, 2)):
+        return "stride_align"
+    if int(t.data_ptr()) % 16:
+        return "ptr_align"
+    sh = [int(x) for x in t.shape]
+    dims = sorted((st[i], sh[i]) for i in range(4) if sh[i] > 1)
+    for (s0, n0), (s1, _n1) in zip(dims, dims[1:]):
+        if s1 < s0 * n0:
+            return "stride_overlap"
+    if any(s > _INT32_MAX for s in st):
+        return "stride_int32"
+    return None
+
+
 def _strided_triple(t, name):
     """`(row, head, batch)` element strides of a logical `(B, H, N, D)` tensor.
 
     The widened kernel takes the addressing as three integers instead of assuming the contiguous
-    `(B*H, N, 128)` form. Only two patterns are legal, and both are views of a contiguous storage, so
-    the address map is injective by construction and cannot alias:
+    `(B*H, N, 128)` form.  The legal views are exactly those `strided_view_reason` accepts -- see
+    its docstring for the derivation of every condition -- and the two patterns earlier releases
+    named are kept as tags so the existing records stay readable:
 
-    * `t.is_contiguous()` -- contiguous HND, `(rs, hs, bs) = (D, N*D, H*N*D)`;
-    * `t.transpose(1, 2).is_contiguous()` -- the physical NHD layout read as HND, which is exactly
-      what `rearrange(q, "B L (H D) -> B H L D")` produces and what NHD `(B, N, H, D)` input
-      transposes to, `(rs, hs, bs) = (H*D, D, N*H*D)`.
+    * `t.is_contiguous()` -- contiguous HND, `(rs, hs, bs) = (D, N*D, H*N*D)`, tag `"hnd_contig"`;
+    * `t.transpose(1, 2).is_contiguous()` -- the physical NHD layout read as HND, which is what
+      `rearrange(q, "B L (H D) -> B H L D")` produces and what NHD `(B, N, H, D)` input transposes
+      to, `(rs, hs, bs) = (H*D, D, N*H*D)`, tag `"nhd_phys"`;
+    * anything else the guard accepts -- MiniMax-H3's fused-QKV view, for example, whose row stride
+      is `3*H*D` -- tag `"general"`.
 
-    Anything else is refused: an arbitrary stride set could overlap itself and the launch is raw.
+    A view that fails the guard is refused with the guard's own reason: the launch is raw and
+    nothing downstream bounds-checks.
     """
-    if t.dim() != 4:
-        raise ValueError("%s must be 4-D (B,H,N,D); got rank %d" % (name, t.dim()))
+    r = strided_view_reason(t, name)
+    if r is not None:
+        if r == "rank":
+            raise ValueError("%s must be 4-D (B,H,N,D); got rank %d" % (name, t.dim()))
+        raise ValueError("%s is not a servable (B,H,N,D) view: %s (shape=%s strides=%s)"
+                         % (name, r, tuple(t.shape), tuple(t.stride())))
     if t.is_contiguous():
-        return int(t.stride(2)), int(t.stride(1)), int(t.stride(0)), "hnd_contig"
-    if t.transpose(1, 2).is_contiguous():
-        return int(t.stride(2)), int(t.stride(1)), int(t.stride(0)), "nhd_phys"
-    raise ValueError("%s is neither contiguous HND nor a physically-NHD (B,H,N,D) view: shape=%s "
-                     "strides=%s" % (name, tuple(t.shape), tuple(t.stride())))
+        tag = "hnd_contig"
+    elif t.transpose(1, 2).is_contiguous():
+        tag = "nhd_phys"
+    else:
+        tag = "general"
+    return int(t.stride(2)), int(t.stride(1)), int(t.stride(0)), tag
 
 
 class Sk1Attn:

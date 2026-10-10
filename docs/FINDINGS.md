@@ -1477,3 +1477,23 @@ Memory pressure changes the baseline. When the timing process held nearly all 16
 Regression after both switches: 179 of 179 accuracy cells within the 1.03 error-ratio bar (worst 1.024); 288 of 288 outlier cells finite with int8 on and off.
 
 **Status:** shipped (v0.2.0).
+
+### F160 - Serving the fused-QKV views that video models send <sub>(track H31)</sub>
+
+**Question.** MiniMax-H3 hands attention q, k and v as views into one fused `qkv_proj` output, so their row stride is `3*H*D`. The envelope added in F153 accepted only two patterns (contiguous HND and physical NHD) and refused everything else, so H3's calls fell back to PR #368 -- silently, and even with `SAGEATTN_SK1_BF16=1`, because the refusal happened before any strict check.
+
+**Result.** The pattern whitelist is replaced by the raw launch's own requirements, stated once in `sk1_loader.strided_view_reason` and used by both the pre-launch envelope and the loader's contract check, so the two can no longer disagree. The reasons are `rank`, `stride_last`, `stride_nonpos`, `stride_align`, `ptr_align`, `stride_overlap` and `stride_int32`; H23's catch-all `strided_pattern` is retired and no code path returns it. A census over the H23/H26 cell set found 88 cells unchanged, 3 newly accepted and 0 newly refused. The route check on H3's own layout (N=12555, H=56, D=128, bf16, strides `(7168, 128, 21504, 1)`) is served by `sk1_t4a1nb` for the strided call and `sk1_t4a1sb` for the contiguous one, and the two agree bit for bit (`max_abs_diff` 0.0, no non-finite values).
+
+Against PR #368 at six production sizes, the full call runs at 0.87-0.94 of its time. In a real H3 w4a8 int4 render at 864x480 and 124 frames, the sampling phase runs at 0.950 (4 steps) and 0.847 (8 steps).
+
+One limitation is recorded rather than fixed: the guard checks each stride against 2^31-1, but Triton computes the prologue's element offsets in int32, so a stride whose product with N overflows would wrap there even though every argument fits. Nothing in the tree reaches that today.
+
+**Status:** shipped (v0.3.0).
+
+### F161 - The production install was a build without the guard <sub>(track H32, H33)</sub>
+
+**Question.** Does the faster-at-production claim hold for the copy ComfyUI actually imports?
+
+**Result.** It did not. The installed package was `2.2.0+amd.gfx12.2`, whose loader has no `strided_view_reason` at all, so H3 was still taking the fallback and the claim was false for that build -- not merely unverified. Installing the wheel built from this tree fixed it, and the route check above was re-run against the installed copy rather than the working tree: PASS, strided served by `sk1_t4a1nb`, contiguous by `sk1_t4a1sb`, `max_abs_diff` 0.0, 0.9 s. A bench script run by path resolves `sageattention` to the installed package, while `python -c` run from the repository root shadows it with the working tree; the check is done from a neutral directory for that reason.
+
+**Status:** confirmed (v0.3.0).

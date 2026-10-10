@@ -553,6 +553,23 @@ def bf16_status() -> dict:
                             _BACKEND_BN_FAILED))
 
 
+_SVR = None
+
+
+def _strided_reason(t, name):
+    """The widened-acceptance guard, resolved once on first use.
+
+    It runs on the hot path of every call -- `_envelope_ok` runs three times per attention call --
+    and the non-kernel part of that path measures about 0.20 ms per call, so the import is cached
+    rather than repeated.
+    """
+    global _SVR
+    if _SVR is None:
+        from .sk1_loader import strided_view_reason
+        _SVR = strided_view_reason
+    return _SVR(t, name)
+
+
 def _envelope_ok(q, k, v, tensor_layout, is_causal, sm_scale, return_lse, smooth_k, smooth_v,
                  attn_mask):
     import torch
@@ -586,11 +603,14 @@ def _envelope_ok(q, k, v, tensor_layout, is_causal, sm_scale, return_lse, smooth
         qq, kk, vv = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
     else:
         qq, kk, vv = q, k, v
-    for t in (qq, kk, vv):
-        if t.stride(3) != 1:
-            return "stride_last"
-        if not (t.is_contiguous() or t.transpose(1, 2).is_contiguous()):
-            return "strided_pattern"
+    # Normalise to the (B, H, N, D) reading the kernel uses, then apply the stride rule.  The rule
+    # lives in one place -- `sk1_loader.strided_view_reason` -- so this envelope can never accept a
+    # pattern the loader's own contract check would refuse, or the reverse.  Contiguous HND still
+    # satisfies it trivially and still takes the unchanged object and code path below.
+    for nm, t in (("q", qq), ("k", kk), ("v", vv)):
+        r = _strided_reason(t, nm)
+        if r is not None:
+            return r
     q, k, v = qq, kk, vv
     # head_dim is 64 or 128, and the three tensors must agree on it (`q.size(3)` alone would let a D=64
     # q against a D=128 k reach the raw launch). `try_sk1_t1` picks the object from this same value.
