@@ -233,8 +233,8 @@ Not everything worked:
 ## 10. What is next
 
 - ~~**Video models end to end.**~~ Closed in v0.3.0: MiniMax-H3 fuses q/k/v into one projection,
-  and serving that view was the whole of the release (F160). The sampling phase runs at 0.950 of
-  PR #368's time at 4 steps and 0.847 at 8 steps.
+  and serving that view was the whole of the release (F160). The sampling phase is 5 % faster at 4 steps and 15 % at 8 (0.950 and 0.847 of
+  PR #368's time).
 - **Per-call overhead.** At the tiny text-fusion shapes, launch and quantization cost more than the
   attention itself (F153). It is at most 0.17 ms a call, but there are many such calls.
 - **head_dim 64** needs its own design rather than a port of the D=128 kernel.

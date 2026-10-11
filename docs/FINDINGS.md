@@ -1484,7 +1484,7 @@ Regression after both switches: 179 of 179 accuracy cells within the 1.03 error-
 
 **Result.** The pattern whitelist is replaced by the raw launch's own requirements, stated once in `sk1_loader.strided_view_reason` and used by both the pre-launch envelope and the loader's contract check, so the two can no longer disagree. The reasons are `rank`, `stride_last`, `stride_nonpos`, `stride_align`, `ptr_align`, `stride_overlap` and `stride_int32`; H23's catch-all `strided_pattern` is retired and no code path returns it. A census over the H23/H26 cell set found 88 cells unchanged, 3 newly accepted and 0 newly refused. The route check on H3's own layout (N=12555, H=56, D=128, bf16, strides `(7168, 128, 21504, 1)`) is served by `sk1_t4a1nb` for the strided call and `sk1_t4a1sb` for the contiguous one, and the two agree bit for bit (`max_abs_diff` 0.0, no non-finite values).
 
-Against PR #368 at six production sizes, the full call runs at 0.87-0.94 of its time. In a real H3 w4a8 int4 render at 864x480 and 124 frames, the sampling phase runs at 0.950 (4 steps) and 0.847 (8 steps).
+Against PR #368 at six production sizes, the full call is 6-13 % faster (0.87-0.94 of its time). In a real H3 w4a8 int4 render at 864x480 and 124 frames, the sampling phase runs at 0.950 (4 steps) and 0.847 (8 steps).
 
 One limitation is recorded rather than fixed: the guard checks each stride against 2^31-1, but Triton computes the prologue's element offsets in int32, so a stride whose product with N overflows would wrap there even though every argument fits. Nothing in the tree reaches that today.
 

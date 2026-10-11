@@ -121,9 +121,11 @@ stride is `3*H*D`, not its own width. Earlier releases refused that layout, whic
 quietly ran PR #368's path even with `SAGEATTN_SK1_BF16=1` set. v0.3 serves it.
 
 The margins are ratios, not milliseconds: this GPU's clock cannot be pinned (see F073), so every
-timing block is ratio-only. End to end in the same workflow, the sampling phase runs at **0.950** of
-PR #368's time at 4 steps and **0.847** at 8 steps, same checkpoint, same seed. Loading dominates the
-wall clock, so the "Prompt executed" totals do not resolve this and are not quoted as a speedup.
+timing block is ratio-only, and every ratio in this section is our time divided by PR #368's, so
+below 1 means we are faster. End to end in the same workflow, the sampling phase takes **0.950** of
+PR #368's time at 4 steps and **0.847** at 8 steps, which is 5 % and 15 % faster, same checkpoint and
+seed. Loading dominates the wall clock, so the "Prompt executed" totals do not resolve this and are
+not quoted as a speedup.
 The sweep stops at N = 99 792 because that is where the launch's 32-bit addressing runs out, not
 because the margin does.
 
