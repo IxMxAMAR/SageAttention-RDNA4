@@ -8,7 +8,9 @@ gfx12 port from [SageAttention PR #368](https://github.com/thu-ml/SageAttention/
 that sit hand-written HIP attention kernels that take over the common case: head_dim 128, in fp16
 or bf16. Against PR #368's own kernels they are **1.5–2.0× faster on causal attention and
 1.06–1.3× faster on non-causal attention** in fp16, and **2.2× and 1.3× faster** in bf16, measured
-over the full call.
+over the full call. Since v0.4.0 the quantization step in front of the kernel is hand-written as
+well, so short calls, from a few hundred to a few thousand tokens, also take only 0.58–0.80 of
+PR #368's time.
 
 fp16 calls compute Q·K in int8 with one scale per token, which is more precise than fp8 at about the
 same speed. bf16 calls compute Q·K in fp8.
@@ -52,6 +54,26 @@ lead. `SAGEATTN_SK1_INT8=0` takes it back if you prefer speed there.
 
 When the GPU's memory is nearly full, PR #368's bf16 path slows down by up to 1.9× and this one
 does not, so on a full card the gap is wider. The table is measured without that pressure.
+
+### Short calls (v0.4.0)
+
+Every call quantizes K and V before the attention kernel runs. Up to v0.3.0 that was 3–4 Triton
+launches, and on short sequences the launches cost more than the attention itself, so the shortest
+calls were up to 5× slower than PR #368's. v0.4.0 does it in 1–2 launches of a prebuilt HIP code
+object. fp16, B=1, D=128, non-causal, `smooth_k` on, full call, our time divided by PR #368's:
+
+| N | H=24 | H=48 |
+|---|---|---|
+| 288 | 0.58 | 0.68 |
+| 512 | 0.65 | 0.71 |
+| 1056 | 0.73 | 0.80 |
+| 4118 | 0.78 | 0.79 |
+
+Calls this short are noisy to time: the same binary timed twice in one block differed by up to 7 %.
+That is far smaller than the effect, but read the cells as ±0.05. At the production sizes in the
+tables above the new prologue is within 0.8 % of the old one, so those numbers stand. It also needs
+no compiler at run time: the first call in a fresh process takes about 0.16 s instead of about
+1.6 s, and there is no 32-bit limit on sequence length any more (F162).
 
 All of these are ratios. On this card a software clock check can confirm that the clock did not
 move during a block, but it cannot pin the absolute clock. So the absolute milliseconds are not
@@ -105,6 +127,10 @@ per token instead. Measured on real activations captured from Krea2 and Flux2-Kl
 - **bf16** error is within 2.4 % of the fp16 fp8 kernel's on every test cell. With values large
   enough to overflow, it produces non-finite output only where exact fp32 attention overflows too
   (F158, F159).
+- **v0.4.0 computes the same bytes as v0.3.0** with `smooth_k` off, including all-zero rows, values
+  past fp8's range, and NaN/Inf. With `smooth_k` on, the key mean is now summed in fp64, which is
+  deterministic and more accurate than the old fp32 sum. A small share of outputs differ from
+  v0.3.0 by rounding, with the same error against exact attention (F162, F163).
 
 In the Krea2 render tests the images from this package were closer to full-precision attention
 than SageAttention 1.x's: median PSNR 18.5 vs 13.5 dB at 1 MP and 21.7 vs 15.6 dB at 2 MP in fp16,
@@ -134,14 +160,14 @@ because the margin does.
 The prebuilt wheel targets exactly this stack:
 
 - Windows 10/11, Python 3.12
-- AMD Radeon RX 9070 or RX 9070 XT (`gfx1201`)
+- AMD Radeon RX 9070 or RX 9070 XT (`gfx1201`); the RX 9060 XT (`gfx1200`) is opt in, see below
 - PyTorch `2.13.0+rocm10.0.0` (the ROCm Python packages AMD publishes for gfx120X)
 
 Download the wheel from [Releases](../../releases) and install it into the Python environment
 that runs your models. For ComfyUI that means ComfyUI's own venv. Close ComfyUI first.
 
 ```
-python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.3-cp312-cp312-win_amd64.whl
+python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.4-cp312-cp312-win_amd64.whl
 ```
 
 `--no-deps` keeps pip from touching your PyTorch install. The compiled extensions are built
@@ -152,9 +178,9 @@ against that exact PyTorch version. For any other version, build from source (se
 There is no prebuilt Linux wheel, but the kernels load on Linux too, thanks to
 [boxwrench](https://github.com/boxwrench) ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1)). It was tested on a Radeon AI PRO R9700, which is
 also `gfx1201`, under Ubuntu 24.04 with PyTorch `2.9.1+rocm7.2.1`. Build from source with
-`PYTORCH_ROCM_ARCH=gfx1201`. [docs/BUILD.md](docs/BUILD.md) describes the Windows build. The
-package's runtime check expects PyTorch `2.13.0+rocm10.0.0`, the version the Windows wheel is
-built against, so set `SAGEATTENTION_ALLOW_UNVERIFIED_TORCH=1` when you build against any other.
+`PYTORCH_ROCM_ARCH=gfx1201`. [docs/BUILD.md](docs/BUILD.md) describes the Windows build. Since
+v0.4.0 the build records the PyTorch version it was built against and the runtime check compares
+with that, so a source build against your own PyTorch passes without any override.
 
 ## Use
 
@@ -169,11 +195,12 @@ ComfyUI: start it with `--use-sage-attention`.
 The hand-written kernels are used automatically when **all** of these hold. Anything else goes to
 the gfx12 kernel from PR #368, with the same results contract:
 
-- the GPU is `gfx1201`, the HIP runtime resolves, and the code object loads;
+- the GPU is `gfx1201` (or `gfx1200` with `SAGEATTN_SK1_GFX1200=1`), the HIP runtime resolves,
+  and the code object loads;
 - fp16 or bf16 inputs and head_dim 128;
-- HND or NHD layout, either contiguous or a view whose memory is laid out as NHD, which covers
-  the usual ComfyUI paths. Views into one fused QKV buffer, which is how MiniMax H3 passes them,
-  are not served yet and fall back;
+- HND or NHD layout, contiguous or any view whose strides the kernel can address: the last axis
+  contiguous, strides that are multiples of 8 elements, a 16-byte-aligned start. That covers the
+  usual ComfyUI paths and the fused-QKV views MiniMax H3 passes;
 - query length equal to key length, either fully causal or non-causal;
 - no attention mask, `return_lse=False`, `smooth_v=False`.
 
@@ -191,6 +218,9 @@ tries the bf16 kernel, then PR #368's.
 | `SAGEATTN_SK1_BF16` unset | default: bf16 calls use the hand-written kernel |
 | `SAGEATTN_SK1_BF16=0` | bf16 calls go to PR #368's path, as in v0.1.0 |
 | `SAGEATTN_SK1_BF16=1` | strict: raise instead of falling back when the bf16 kernel is missing or fails to load, or for a head_dim 64 call |
+| `SAGEATTN_SK1_PROLOGUE` unset | default: quantize K and V with the prebuilt HIP prologue |
+| `SAGEATTN_SK1_PROLOGUE=triton` | use v0.3.0's Triton prologue instead |
+| `SAGEATTN_SK1_GFX1200=1` | allow the hand-written kernels on an RX 9060 XT (`gfx1200`). Off by default because nobody has run them on that card yet; the device always picks its own builds, so the switch does nothing on a `gfx1201` card |
 
 The variables are read once, when the package is imported. `SAGEATTN_SK1_BACKEND=0` turns all of
 them off. The same switches exist per call: `sageattn(..., sk1_backend=, sk1_int8=, sk1_bf16=)`.
@@ -219,14 +249,18 @@ per process and carries on with the fallback.
 
 ## Limitations
 
-- The prebuilt kernels target `gfx1201` only. Other GPUs use the fallback path.
+- The prebuilt kernels target `gfx1201`, plus `gfx1200` behind a switch. The `gfx1200` builds have
+  the same machine code as the `gfx1201` ones but have not been run on that card yet
+  ([docs/GFX1200-TESTING.md](docs/GFX1200-TESTING.md)). Other GPUs use the fallback path.
 - Every speed and accuracy number here was measured on Windows. On Linux the kernels load and the
   test suite passes, but nothing has been timed there yet.
-- head_dim 128 only. A head_dim 64 kernel was built and tested, but it was slower than PR #368's,
-  so head_dim 64 still uses the fallback (F156).
+- head_dim 128 only. Two head_dim 64 kernels were built and tested, the second on the new prologue,
+  and both were slower than PR #368's, so head_dim 64 still uses the fallback (F156, F165).
 - On long sequences (around 47k tokens, non-causal) the int8 default is up to 1.7 % slower per
   attention call than the fp8 kernel.
-- End-to-end validation so far is one model family (Krea2), in fp16 and bf16. The kernels
+- PyTorch 2.14 / ROCm 10.1 is not supported yet: on the WHQL driver it was tried with, PyTorch
+  2.14's own kernels do not run (F164).
+- End to end, the package has been run in Krea2 (fp16 and bf16) and MiniMax-H3 (bf16). The kernels
   themselves are checked bit for bit across shapes and layouts, and against an fp64 reference.
 
 ## A note from me

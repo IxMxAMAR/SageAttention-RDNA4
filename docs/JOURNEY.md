@@ -230,11 +230,44 @@ Not everything worked:
   other two showed that barriers are cheap here (0.6–0.9 %) and that `s_setprio` costs time
   instead of saving it. The rewrite was not started (F155).
 
-## 10. What is next
+## 10. The step in front of the kernel
 
-- ~~**Video models end to end.**~~ Closed in v0.3.0: MiniMax-H3 fuses q/k/v into one projection,
-  and serving that view was the whole of the release (F160). The sampling phase is 5 % faster at 4 steps and 15 % at 8 (0.950 and 0.847 of
-  PR #368's time).
-- **Per-call overhead.** At the tiny text-fusion shapes, launch and quantization cost more than the
-  attention itself (F153). It is at most 0.17 ms a call, but there are many such calls.
-- **head_dim 64** needs its own design rather than a port of the D=128 kernel.
+v0.3.0 had closed the first item on the old list, video models end to end. MiniMax-H3 fuses q, k and
+v into one projection, and serving that view was the whole of that release (F160): its sampling
+phase became 5 % faster at 4 steps and 15 % at 8 (0.950 and 0.847 of PR #368's time).
+
+Per-call overhead was the next item. Every call quantizes K and V before the
+kernel runs, and that step was still Triton: 3–4 launches, a JIT compiler behind them, offsets
+computed in 32 bits, and generated code that changed with whether a stride happened to divide by
+16. Each of those had already cost something. The shortest calls were up to 5× slower than
+PR #368's, H3 stopped being served near 100 000 tokens, padded layouts were not quite bit-identical,
+and the first call in a process spent a second and a half compiling.
+
+One hand-written HIP kernel replaced it and removed all four at once (F162). With `smooth_k` off it
+writes exactly the bytes Triton wrote; with `smooth_k` on it sums the key mean in fp64. Short calls
+now take 0.58–0.80 of PR #368's time, so the package is faster at every size measured, and the
+production sizes did not move.
+
+The new kernel is launched raw, so a mistake in its addressing would corrupt GPU memory instead of
+raising an error. Before it shipped, an independent review read it line by line for exactly that
+(F163). It found no out-of-bounds access, three small issues that were fixed, and a gap in the
+tests: extreme values had never been compared byte for byte. They are now.
+
+Three other things were tried in the same round and did not change the release:
+
+- **ROCm 10.1.** PyTorch 2.14's own kernels do not run on the WHQL driver here, while this
+  package's kernels do. It waits for a driver. Its newer compiler gives our kernels exactly the
+  same registers as the old one (F164).
+- **head_dim 64, again,** on the new prologue. Still slower than PR #368 at every real shape: the
+  overhead was not the main loss after all, the kernel is (F165).
+- **RX 9060 XT.** The same machine code, built for gfx1200, ships behind a switch until someone
+  with the card runs it (F166). Testing the switch found two ways it could load the wrong builds;
+  both were fixed before release.
+
+## 11. What is next
+
+- **head_dim 64** with a kernel designed for it, rather than a port of the head_dim 128 one.
+- **ROCm 10.1 / PyTorch 2.14,** once a WHQL driver runs it. An experimental pull request carries
+  the build.
+- **Linux numbers and a Linux wheel,** with community testing.
+- **An RX 9060 XT owner** to confirm the gfx1200 builds.

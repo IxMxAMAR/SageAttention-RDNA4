@@ -2,12 +2,13 @@
 
 This is the record of what was tried, measured and decided while porting SageAttention's quantized attention to AMD RDNA4 (gfx1201, RX 9070 XT) on Windows, with the aim of beating the existing gfx12 port in SageAttention PR #368. It lists every numbered finding and every work track. Refuted and closed results are kept next to the wins: they are what stops the next person from repeating them.
 
-The work went through four phases.
+The work went through five phases.
 
 1. **A Triton fp8 kernel.** The gap to PR #368 was diagnosed, levers were tried and closed, accuracy work was done (per-token fp8 scaling, `smooth_k`, `smooth_v`), and correctness bugs were found and fixed.
 2. **Attempts to hand-edit Triton's compiled output.**
 3. **A hand-written HIP kernel, SK1, and its variants.** `sk1_t1` (one softmax rescale per 64 keys) and `sk1_t4a1` (mask and skip work guarded by one branch) were wins; many other variants were refuted.
 4. **Shipping.** Packaging behind a flag, then default-on with fallback; a real-world fp8 overflow found when a render went black, and its fix; end-to-end tests in a diffusion model; widening the input envelope; then int8 Q·K and bf16 kernels, made the defaults in v0.2.0.
+5. **Around the kernel.** Fused-QKV views served (v0.3.0), the Triton quantization step replaced by hand-written HIP, RX 9060 XT builds behind a switch (v0.4.0), and two things that did not pay off: a second head_dim 64 kernel and ROCm 10.1.
 
 ## How to read an entry
 
@@ -1497,3 +1498,47 @@ One limitation is recorded rather than fixed: the guard checks each stride again
 **Result.** It did not. The installed package was `2.2.0+amd.gfx12.2`, whose loader has no `strided_view_reason` at all, so H3 was still taking the fallback and the claim was false for that build -- not merely unverified. Installing the wheel built from this tree fixed it, and the route check above was re-run against the installed copy rather than the working tree: PASS, strided served by `sk1_t4a1nb`, contiguous by `sk1_t4a1sb`, `max_abs_diff` 0.0, 0.9 s. A bench script run by path resolves `sageattention` to the installed package, while `python -c` run from the repository root shadows it with the working tree; the check is done from a neutral directory for that reason.
 
 **Status:** confirmed (v0.3.0).
+
+## 15. The prologue, other targets, and what did not move
+
+Replacing the Triton quantization step with hand-written HIP, an independent review of it, a look at ROCm 10.1 and its compiler, a second head_dim 64 attempt, and RX 9060 XT builds.
+
+### F162 — A HIP prologue instead of Triton <sub>(track H34)</sub>
+
+**Question.** Every call quantizes K and V before the attention kernel, through 3–4 Triton launches with a JIT compiler behind them, 32-bit offsets and code specialised on whether integer arguments divide by 16. Can a hand-written HIP prologue replace it on every default path with the same output?
+
+**Result.** One templated kernel (fp16 or bf16 input, int8 or fp8 K, explicit strides, 64-bit offsets) plus a mean kernel for `smooth_k`: 72 and 16 VGPR, no spills. Launches per call drop from 3–4 to 1–2. With `smooth_k` off, the quantized bytes and the served output are bit-identical to the Triton prologue on 1584 of 1584 cells (fp16 int8, fp16 fp8 and bf16; contiguous, strided and fused-QKV layouts). With `smooth_k` on, the key mean is summed in fp64: the served output differs from the Triton prologue's on 273 of 1584 cells, and the worst error ratio against exact attention is 1.0000046. The outlier sets (992 cells) produce no new non-finite value. In a fresh process with an empty Triton cache, nothing is compiled and the first call takes 158 ms instead of 1575 ms (fp16) and 7.6 ms instead of 476 ms (bf16). The full call takes 0.60–0.99 of the Triton prologue's time at N = 288 to 4 118, which is 0.58–0.80 of PR #368's, and 1.000–1.008 at production sizes. A served cell whose largest K/V offset is 52 million elements past 2^31 is finite and bit-identical to the same data made contiguous. H31's padded-head mismatches, which came from Triton's divisibility specialisation, disappear (3168 of 3168 bit-identical).
+
+**Status:** shipped (default in v0.4.0; `SAGEATTN_SK1_PROLOGUE=triton` restores the Triton prologue).
+
+### F163 — An independent review of the HIP prologue <sub>(track H34b)</sub>
+
+**Question.** The prologue is launched raw through ctypes, so an addressing mistake would corrupt GPU memory instead of raising. Does an adversarial read find out-of-bounds access, inputs that reach the kernel unchecked, or numerical differences from Triton?
+
+**Result.** No memory-safety defect: every offset that can pass 2^31 is computed in 64 bits, every store stays inside its buffer, and every input the kernel cannot address is refused before launch. For finite inputs with `smooth_k` off the arithmetic matches Triton's step for step. Three low-severity findings, all fixed and re-verified on the GPU: (1) a launch or allocation error inside the prologue escaped as an exception and sent the call to PR #368's path instead of the Triton prologue; it is now caught, and N < 1 is refused. (2) A floor parameter was applied to the V and fp8-K scales, where Triton hard-codes 1e-12; it now matches. (3) The `smooth_k` mean had been described as exact and correctly rounded, which an fp64 sum is not when large values cancel; the claim was withdrawn. It has no effect on the output, because a shift in the mean changes every score of a query by the same amount and softmax ignores it. The review also showed that HIP copies kernel arguments at launch, so a queue that kept them alive was unnecessary. The test data had been ordinary random values only; an extreme set (all-zero rows, values at and past 448, values past the fp16 and bf16 ranges, single huge outliers, NaN and ±Inf rows) is bit-identical between the two prologues on 1584 of 1584 cells.
+
+**Status:** confirmed; the fixes are in v0.4.0.
+
+### F164 — ROCm 10.1 and LLVM 24 <sub>(track H35, H35b)</sub>
+
+**Question.** ROCm 10.1 (2026-10-05) brings PyTorch 2.14, HIP 7.16 and LLVM 24. Does it run on the test machine's WHQL driver, and does the newer compiler improve the kernels?
+
+**Result.** On the WHQL driver (internal version 32.0.31041.1004) the GPU enumerates, and allocation, copies and synchronisation work, but every PyTorch 2.14 kernel fails with `hipErrorInvalidKernelFile`, and a failed launch is sticky for the process. This package's own code objects load and launch under HIP 7.16 when launched first. `HSA_OVERRIDE_GFX_VERSION` makes no difference. ROCm 10.1 pairs with a newer, optional driver, which was not installed. LLVM 24 rebuilds all nine code objects; under the current HIP 7.15 they load, run and are bit-identical in behaviour, with identical registers, spills, LDS and occupancy. The head_dim 64 kernel stays at 224 VGPR, so the compiler was not why it lost. No valid timing cell is slower than 1.0011, but the shortest cell (N = 288) could not be measured cleanly in three attempts, so the adoption rule is not met and the current objects stay.
+
+**Status:** closed for now. PyTorch 2.14 support waits for a driver it runs on. The build now records the torch version it was built against, which a 2.14 wheel will need.
+
+### F165 — head_dim 64 on the HIP prologue <sub>(track H36)</sub>
+
+**Question.** The first head_dim 64 kernel (F156) lost mostly to about 0.2 ms of non-kernel work per call. With the HIP prologue removing most of that, does it beat PR #368?
+
+**Result.** A head_dim 64 HIP prologue (bit-identical to Triton with `smooth_k` off, on random and extreme values) and a bf16 version of the head_dim 64 kernel (the same registers as fp16) were built and gated. Full call against PR #368 at six shapes taken from the model sources, our time divided by theirs: SDXL 1024² at its three self-attention levels (1,10,4096,64) 1.77, (1,20,1024,64) 2.54 and (1,5,16384,64) 1.33; LTX-2's audio self-attention (1,32,97,64) 5.26; LTX-Video (1,32,4992,64) 1.03; CogVideoX-2B (1,30,17550,64) 1.14. Slower at all six. The prologue was not the main loss; the kernel is.
+
+**Status:** refuted (not promoted). head_dim 64 needs a kernel designed for it rather than a port of the head_dim 128 one.
+
+### F166 — RX 9060 XT builds, opt in <sub>(track H37)</sub>
+
+**Question.** The RX 9060 XT (gfx1200) shares RDNA4's instruction set with the RX 9070 (gfx1201). Can the kernels ship for it without a gfx1200 card to run them on?
+
+**Result.** All eight objects the default paths use build for gfx1200 with the same compiler and flags. Their `.text` sections are byte-identical to the gfx1201 builds; only the target ID differs, and registers, LDS and kernel descriptors are identical. The gfx1200 builds are used only on a gfx1200 device and only with `SAGEATTN_SK1_GFX1200=1`, and the device always chooses its own builds. A test probe found two containment bugs before release, both fixed: setting the switch on a gfx1201 card made the loader pick the gfx1200 objects, which failed to load and then raised; and loaded objects were not dropped when the device changed. The gfx1201 results are unchanged (181/181, 184/184 and 1584/1584 bit-identical).
+
+**Status:** shipped opt in (v0.4.0); waiting for someone with the card to run [GFX1200-TESTING.md](GFX1200-TESTING.md).

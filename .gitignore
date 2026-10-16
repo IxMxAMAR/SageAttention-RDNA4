@@ -21,3 +21,6 @@ csrc/**/*_hip.*
 .venv/
 venv/
 env/
+
+# Generated at build time by setup.py (records the torch the extensions were built against)
+sageattention/_build_stamp.py

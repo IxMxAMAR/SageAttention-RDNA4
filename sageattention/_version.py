@@ -22,7 +22,9 @@ This module converts that silent failure into a hard, actionable ImportError at
 
 The `BUILD_*` values below are the toolchain the shipped wheel was built with.
 `BUILD_TORCH` is compared against the installed torch at import time; the rest
-are informational.  Update them when rebuilding against a different torch.
+are informational.  `setup.py build_ext` records them in `_build_stamp.py` from the
+interpreter it compiles against; the literals below are the fallback for a tree
+or an already-shipped wheel that has no stamp file.
 """
 
 from __future__ import annotations
@@ -30,13 +32,26 @@ from __future__ import annotations
 import os
 
 # --- Build fingerprint ------------------------------------------------------
-BUILD_TORCH = "2.13.0+rocm10.0.0"
-BUILD_ROCM = "7.15.26333"
-BUILD_ARCH = "gfx1201"
-BUILD_PYTHON = "3.12.10"
-BUILD_GLIBCXX_USE_CXX11_ABI = True
-BUILD_MSVC = "14.50.35717"
-BUILD_ID = "sageattention-gfx12/2.2.0+amd.gfx12.3"
+try:
+    from ._build_stamp import (  # noqa: F401
+        BUILD_ARCH,
+        BUILD_GLIBCXX_USE_CXX11_ABI,
+        BUILD_ID,
+        BUILD_MSVC,
+        BUILD_PYTHON,
+        BUILD_ROCM,
+        BUILD_STAMP_SOURCE,
+        BUILD_TORCH,
+    )
+except ImportError:  # pragma: no cover - the no-stamp fallback
+    BUILD_TORCH = "2.13.0+rocm10.0.0"
+    BUILD_ROCM = "7.15.26333"
+    BUILD_ARCH = "gfx1201"
+    BUILD_PYTHON = "3.12.10"
+    BUILD_GLIBCXX_USE_CXX11_ABI = True
+    BUILD_MSVC = "14.50.35717"
+    BUILD_ID = "sageattention-gfx12/2.2.0+amd.gfx12.4"
+    BUILD_STAMP_SOURCE = "literal"
 
 # The two extension modules that must be present for a complete install.
 _REQUIRED_EXTENSIONS = ("_qattn_gfx12_native", "_fused")

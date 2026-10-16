@@ -462,10 +462,13 @@ class Sk1Attn:
             raise ValueError("symbols must be (non-causal, causal); got %r" % (self.symbols,))
         # `with_s` defaults from the symbol pair, so a caller that only changes `symbols` cannot
         # silently launch the 12-argument kernel with 11 arguments (a GPU page fault).
-        self.with_s = (any("t4a1s" in s for s in self.symbols) if with_s is None else bool(with_s))
+        # The D=64 objects are the 18-argument strided form with `S`, so `d64` implies both. `d64`
+        # appears in no D=128 symbol, so the D=128 inference is unchanged.
+        self.with_s = (any("t4a1s" in s or "d64" in s for s in self.symbols) if with_s is None
+                       else bool(with_s))
         # Same guard for the six-stride form: defaulting from the symbol pair means a caller that
         # only swaps `symbols` cannot launch the 18-argument kernel with 12 arguments.
-        self.strided = (any("t4a1n" in s for s in self.symbols) if strided is None
+        self.strided = (any("t4a1n" in s or "d64" in s for s in self.symbols) if strided is None
                         else bool(strided))
         # Head dim and query-tile height, likewise inferred from the symbol pair.
         inferred_d = 64 if any("d64" in s for s in self.symbols) else 128
@@ -476,10 +479,13 @@ class Sk1Attn:
         self.bm = int(inferred_bm if bm is None else bm)
         if self.bm not in (128, 256):
             raise ValueError("bm must be 128 or 256; got %d" % self.bm)
-        # The Q/O element dtype, inferred from the symbol pair.
+        # The Q/O element dtype, inferred from the symbol pair. The D=64 bf16 symbols are
+        # `sk1d64bf` / `sk1d64wbf` / `sk1d64mbf`, which do not contain `t4a1sb`, so that pair needs
+        # its own test. No fp16 D=64 symbol contains "bf", so "d64" with "bf" is unambiguous.
         if qo_dtype is None:
             import torch
             qo_dtype = (torch.bfloat16 if any(("t4a1sb" in s) or ("t4a1nb" in s)
+                                              or ("d64" in s and "bf" in s)
                                               for s in self.symbols) else torch.float16)
         self.qo_dtype = qo_dtype
         self.module = self.rt.load_module(hsaco_path)
