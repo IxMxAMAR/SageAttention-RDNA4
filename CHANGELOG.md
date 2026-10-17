@@ -7,18 +7,17 @@ summaries; [docs/FINDINGS.md](docs/FINDINGS.md) has the measurements behind them
 
 ## v0.4.0 — 2.2.0+amd.gfx12.4
 
-**The quantization step before the kernel is now hand-written HIP as well, and that removes most of
-what was left between this package and PR #368 on small calls.**
+**The quantization step before the kernel is now hand-written HIP as well, so short calls are about
+even with PR #368's instead of up to 1.6× slower, and nothing is compiled on first use.**
 
 - **A HIP prologue replaces the Triton one.** Every call quantizes K and V before the attention
   kernel runs. That used to be 3–4 Triton launches with a JIT compiler behind them. It is now 1–2
   launches of a prebuilt code object, on every default path (fp16 with int8 Q·K, fp16 with fp8
   Q·K, bf16; contiguous, strided and fused-QKV layouts). What that changes:
-  - **Small calls are faster, and the package now beats PR #368 at every size measured.** At
-    N = 288 to 4 118 the full call takes 0.58–0.80 of PR #368's time; it used to be up to 5×
-    slower on the tiniest ones. Production sizes are unchanged (within 0.8 %).
-  - **No compile on first use.** With an empty Triton cache the first fp16 call takes about
-    0.16 s instead of about 1.6 s, and nothing is compiled.
+  - **Short calls are faster.** Timed one at a time, a call of 288 to 1 024 tokens takes 0.85–1.13
+    of PR #368's time, where v0.3.0 took 1.12–1.59. Production sizes are unchanged within noise.
+  - **No compile on first use.** In ComfyUI's environment with an empty Triton cache, the first
+    call takes 0.48 s instead of 1.9 s, and nothing is compiled.
   - **No 2^31-element limit.** v0.3.0 stopped serving at about 100 000 tokens at H3's layout,
     because the Triton prologue computed offsets in 32 bits. The HIP prologue uses 64-bit offsets.
   - **Same output.** With `smooth_k` off, the quantized bytes and the attention output are

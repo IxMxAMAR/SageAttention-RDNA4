@@ -9,8 +9,8 @@ that sit hand-written HIP attention kernels that take over the common case: head
 or bf16. Against PR #368's own kernels they are **1.5–2.0× faster on causal attention and
 1.06–1.3× faster on non-causal attention** in fp16, and **2.2× and 1.3× faster** in bf16, measured
 over the full call. Since v0.4.0 the quantization step in front of the kernel is hand-written as
-well, so short calls, from a few hundred to a few thousand tokens, also take only 0.58–0.80 of
-PR #368's time.
+well, so nothing is compiled on first use, and short calls of a few hundred tokens, which took up
+to 1.6× PR #368's time, are now about even with it.
 
 fp16 calls compute Q·K in int8 with one scale per token, which is more precise than fp8 at about the
 same speed. bf16 calls compute Q·K in fp8.
@@ -58,22 +58,27 @@ does not, so on a full card the gap is wider. The table is measured without that
 ### Short calls (v0.4.0)
 
 Every call quantizes K and V before the attention kernel runs. Up to v0.3.0 that was 3–4 Triton
-launches, and on short sequences the launches cost more than the attention itself, so the shortest
-calls were up to 5× slower than PR #368's. v0.4.0 does it in 1–2 launches of a prebuilt HIP code
-object. fp16, B=1, D=128, non-causal, `smooth_k` on, full call, our time divided by PR #368's:
+launches, and on short sequences the launches cost more than the attention itself. v0.4.0 does it
+in 1–2 launches of a prebuilt HIP code object. fp16, B=1, H=48, D=128, non-causal, `smooth_k` on,
+each call timed on its own (synchronized), our time divided by PR #368's:
 
-| N | H=24 | H=48 |
+| N | v0.3.0 | v0.4.0 |
 |---|---|---|
-| 288 | 0.58 | 0.68 |
-| 512 | 0.65 | 0.71 |
-| 1056 | 0.73 | 0.80 |
-| 4118 | 0.78 | 0.79 |
+| 288 | 1.30 | 0.85 |
+| 512 | 1.59 | 1.13 |
+| 1024 | 1.12 | 0.92 |
+| 4096 | 0.89 | 0.87 |
 
-Calls this short are noisy to time: the same binary timed twice in one block differed by up to 7 %.
-That is far smaller than the effect, but read the cells as ±0.05. At the production sizes in the
-tables above the new prologue is within 0.8 % of the old one, so those numbers stand. It also needs
-no compiler at run time: the first call in a fresh process takes about 0.16 s instead of about
-1.6 s, and there is no 32-bit limit on sequence length any more (F162).
+bf16 is within 6 % of these. Back-to-back calls this short are too noisy on this card to time:
+two runs of the same cells disagreed by far more than the effect, so only the one-at-a-time numbers
+are given. At the production sizes in the tables above the two prologues time the same within
+this card's noise (±2 %), so those numbers stand.
+
+It also needs no compiler at run time. In a fresh process in ComfyUI's environment, with an empty
+Triton cache, the first call takes 0.48 s instead of 1.9 s (PR #368's path: 0.24 s). Where Triton
+cannot build its launcher, v0.3.0's prologue could not run and calls fell back to PR #368's path;
+v0.4.0's default path does not use Triton. There is no 32-bit limit on sequence length any more
+(F162).
 
 All of these are ratios. On this card a software clock check can confirm that the clock did not
 move during a block, but it cannot pin the absolute clock. So the absolute milliseconds are not

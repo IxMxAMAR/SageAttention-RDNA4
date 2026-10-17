@@ -239,14 +239,14 @@ phase became 5 % faster at 4 steps and 15 % at 8 (0.950 and 0.847 of PR #368's t
 Per-call overhead was the next item. Every call quantizes K and V before the
 kernel runs, and that step was still Triton: 3–4 launches, a JIT compiler behind them, offsets
 computed in 32 bits, and generated code that changed with whether a stride happened to divide by
-16. Each of those had already cost something. The shortest calls were up to 5× slower than
-PR #368's, H3 stopped being served near 100 000 tokens, padded layouts were not quite bit-identical,
-and the first call in a process spent a second and a half compiling.
+16. Each of those had already cost something. A lone short call took up to 1.6× PR #368's time,
+H3 stopped being served near 100 000 tokens, padded layouts were not quite bit-identical, and the
+first call in a process spent about two seconds compiling.
 
 One hand-written HIP kernel replaced it and removed all four at once (F162). With `smooth_k` off it
 writes exactly the bytes Triton wrote; with `smooth_k` on it sums the key mean in fp64. Short calls
-now take 0.58–0.80 of PR #368's time, so the package is faster at every size measured, and the
-production sizes did not move.
+are now about even with PR #368's (0.85–1.13 of its time, one call at a time), and the production
+sizes did not move.
 
 The new kernel is launched raw, so a mistake in its addressing would corrupt GPU memory instead of
 raising an error. Before it shipped, an independent review read it line by line for exactly that
