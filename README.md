@@ -289,6 +289,6 @@ Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 - [SageAttention](https://github.com/thu-ml/SageAttention) by the THU-ML group: the
   quantized-attention method and the package this builds on.
-- The gfx12 port in [PR #368](https://github.com/thu-ml/SageAttention/pull/368) by DELUXA, which
+- The gfx12 port in [PR #368](https://github.com/thu-ml/SageAttention/pull/368) by [jammm](https://github.com/jammm) and [0xDELUXA](https://github.com/0xDELUXA), which
   provides the native fallback kernels and the baseline this work is measured against.
 - [boxwrench](https://github.com/boxwrench), for Linux support in the kernel loader ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1)).
