@@ -183,7 +183,7 @@ against that exact PyTorch version. For any other version, build from source (se
 There is no prebuilt Linux wheel, but the kernels load on Linux too, thanks to
 [boxwrench](https://github.com/boxwrench) ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1)). It was tested on a Radeon AI PRO R9700, which is
 also `gfx1201`, under Ubuntu 24.04 with PyTorch `2.9.1+rocm7.2.1`. Build from source with
-`PYTORCH_ROCM_ARCH=gfx1201`. [docs/BUILD.md](docs/BUILD.md) describes the Windows build. Since
+`PYTORCH_ROCM_ARCH=gfx1201`; [docs/LINUX.md](docs/LINUX.md) has the steps. Since
 v0.4.0 the build records the PyTorch version it was built against and the runtime check compares
 with that, so a source build against your own PyTorch passes without any override.
 
