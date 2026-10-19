@@ -1,6 +1,6 @@
 # Linux
 
-There is no prebuilt Linux wheel. The package builds from source on Linux, and the prebuilt kernel
+The package builds from source on Linux, and the prebuilt kernel
 objects load there through `libamdhip64.so.7`
 ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1), by
 [boxwrench](https://github.com/boxwrench)).
@@ -8,10 +8,26 @@ objects load there through `libamdhip64.so.7`
 | Version | GPU | OS | PyTorch | Checked |
 |---|---|---|---|---|
 | v0.2.0 | Radeon AI PRO R9700 (`gfx1201`) | Ubuntu 24.04 | `2.9.1+rocm7.2.1` | kernels load, 88/88 tests pass |
+| v0.4.0 | Radeon AI PRO R9700, ~300 W | Linux | `2.9.1+rocm7.2.1` | source build with no override, 97/97 tests pass, every benchmark row served; H3 bit-identical to a direct kernel call ([boxwrench](https://github.com/boxwrench), #2) |
+| v0.4.0 | Radeon AI PRO R9700, capped at 220 W | Linux | `2.14.0+rocm10.2.0a20261012` (nightly) | 97/97 tests pass, every benchmark row served (VRTest20, #2) |
 
-Every speed and accuracy number in the README was measured on Windows. The Linux H3 timings in #1
-ran on PR #368's path, because H3's fused-QKV views were only served from v0.3.0 on, so there are no
-Linux timings of these kernels yet.
+### Timings
+
+Full `sageattn` call, B=1, D=128, non-causal unless noted, `bench/bench_attention.py`; our time
+compared with PR #368's path (`kernel off`) and with PyTorch SDPA, as speed-ups:
+
+| Setup | Shape | vs PR #368 | vs SDPA |
+|---|---|---|---|
+| boxwrench, torch 2.9.1 | H3 bf16 fused QKV, H=56, N = 27 280 / 31 248 / 61 488 | 1.50 / 1.49 / 1.46× | 3.05 / 3.11 / 3.26× |
+| boxwrench, torch 2.9.1 | default presets, fp16 and bf16 | 1.28–1.85× | |
+| VRTest20, torch 2.14 nightly | H3 bf16 fused QKV, same N | 1.23 / 1.23 / 1.19× | 1.98 / 2.04 / 2.07× |
+| VRTest20, torch 2.14 nightly | fp16, H=48, N = 4096 / 8771 / 16384 | 1.17 / 1.27 / 1.14× | 1.41 / 1.75 / 1.89× |
+| VRTest20, torch 2.14 nightly | bf16, same N | 1.21 / 1.30 / 1.16× | 1.49 / 1.80 / 1.92× |
+
+The hand-written kernel runs at the same speed as on Windows (about 142 ms at N = 27 280 against
+140 ms on an RX 9070 XT). The larger margins with torch 2.9.1 come from PR #368's path and SDPA
+being slower on that older ROCm stack. These were measured on other people's machines with their
+own protocol, so they are not part of the README's tables.
 
 ## Requirements
 

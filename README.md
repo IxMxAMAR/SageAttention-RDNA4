@@ -257,8 +257,8 @@ per process and carries on with the fallback.
 - The prebuilt kernels target `gfx1201`, plus `gfx1200` behind a switch. The `gfx1200` builds have
   the same machine code as the `gfx1201` ones but have not been run on that card yet
   ([docs/GFX1200-TESTING.md](docs/GFX1200-TESTING.md)). Other GPUs use the fallback path.
-- Every speed and accuracy number here was measured on Windows. On Linux the kernels load and the
-  test suite passes, but nothing has been timed there yet.
+- Every speed and accuracy number here was measured on Windows. Linux results from two testers,
+  with torch 2.9.1 and a torch 2.14 nightly, are in [docs/LINUX.md](docs/LINUX.md).
 - head_dim 128 only. Two head_dim 64 kernels were built and tested, the second on the new prologue,
   and both were slower than PR #368's, so head_dim 64 still uses the fallback (F156, F165).
 - On long sequences (around 47k tokens, non-causal) the int8 default is up to 1.7 % slower per
@@ -275,13 +275,15 @@ still improve, but the returns are marginal now, and most of what is left is Tri
 toolchain rather than the attention kernel. If I could, I'd ship this with my own libraries for both
 of them -- but testing and modifying them takes far too long on one GPU.
 
-I've been using DeepSeek V4.1 to summarize my findings and run the tests for me. It has
-been genuinely good at running them across the whole matrix, and the next update will be done the
-same way.
+I've built this with AI coding tools. They wrote most of the kernel code, ran the tests across
+the whole matrix and summarized the findings. I chose what to try, read the results and decided
+what shipped, and nothing went in without passing the bit-for-bit and timing checks in
+docs/METHOD.md. The failures are written up next to the wins in docs/FINDINGS.md.
 
-Next up is head_dim 64, which still uses PR #368's kernel today. After that I may patch Triton for
-Windows for my own use case, or send it upstream. Either way it is a while off -- probably a month or
-more.
+Next up (v0.5) is head_dim 64, which still uses PR #368's kernel: two attempts came out slower,
+so it needs a new design. v0.5 also gets a clean-up pass, with clearer kernel names and fewer
+comments. After that I may patch Triton for Windows for my own use case, or send it upstream.
+Either way it is a while off -- probably a month or more.
 
 ## Credits and license
 
