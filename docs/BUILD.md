@@ -11,8 +11,8 @@ There are two independent build products:
 ## Requirements
 
 - Windows 10/11 with the MSVC build tools (C++ workload).
-- Python 3.12 with a ROCm build of PyTorch. The prebuilt wheel was built against
-  `2.13.0+rocm10.0.0`.
+- Python 3.12 with a ROCm build of PyTorch. The prebuilt wheels were built against
+  `2.13.0+rocm10.0.0` and `2.14.0+rocm10.1.0`.
 - The ROCm SDK for gfx120X in the same environment. The Python SDK packages work: their
   `_rocm_sdk_devel` package provides clang and the HIP headers.
 

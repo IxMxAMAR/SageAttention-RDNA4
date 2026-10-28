@@ -38,10 +38,11 @@ even with PR #368's instead of up to 1.6× slower, and nothing is compiled on fi
 Not in this release:
 - **head_dim 64** still uses PR #368's kernel. A head_dim 64 kernel on the new prologue was built
   and measured, and it is still 1.03–5.3× slower than PR #368's. That needs its own design.
-- **ROCm 10.1 / PyTorch 2.14.** On the WHQL driver this was tested with, PyTorch 2.14's own kernels
-  do not run at all (`invalid kernel file`), although this package's kernels load and run on that
-  runtime. Support is in an experimental pull request, waiting for testing on a driver where
-  PyTorch 2.14 works.
+- **ROCm 10.1 / PyTorch 2.14** came later, on 2026-10-29 (#3): a second Windows wheel,
+  `sageattention-2.2.0+amd.gfx12.4-214-cp312-cp312-win_amd64.whl`, built against
+  `2.14.0+rocm10.1.0`. Same code; it passes 97 of 97 tests on two machines and its output is
+  bit-identical to the 2.13 wheel. PyTorch 2.14 itself needs a recent driver (it failed on
+  32.0.31041.1004 and runs on Adrenalin 26.8.1 and 26.10.1).
 - **A Linux wheel.** Linux runs from source; Linux testing of this release happens in a pull
   request.
 

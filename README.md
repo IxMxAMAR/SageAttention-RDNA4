@@ -162,18 +162,24 @@ because the margin does.
 
 ## Install
 
-The prebuilt wheel targets exactly this stack:
+The prebuilt wheels target exactly this stack:
 
 - Windows 10/11, Python 3.12
 - AMD Radeon RX 9070 or RX 9070 XT (`gfx1201`); the RX 9060 XT (`gfx1200`) is opt in, see below
-- PyTorch `2.13.0+rocm10.0.0` (the ROCm Python packages AMD publishes for gfx120X)
+- PyTorch `2.13.0+rocm10.0.0` or `2.14.0+rocm10.1.0` (the ROCm Python packages AMD publishes for
+  gfx120X). There is one wheel for each; the one with `-214-` in its name is for 2.14
 
-Download the wheel from [Releases](../../releases) and install it into the Python environment
-that runs your models. For ComfyUI that means ComfyUI's own venv. Close ComfyUI first.
+Download the wheel for your PyTorch from [Releases](../../releases) and install it into the Python
+environment that runs your models. For ComfyUI that means ComfyUI's own venv. Close ComfyUI first.
 
 ```
-python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.4-cp312-cp312-win_amd64.whl
+python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.4-cp312-cp312-win_amd64.whl       # PyTorch 2.13
+python -m pip install --no-deps sageattention-2.2.0+amd.gfx12.4-214-cp312-cp312-win_amd64.whl   # PyTorch 2.14
 ```
+
+`python -c "import torch; print(torch.__version__)"` tells you which PyTorch you have. Both wheels
+compute bit-identical output; installed next to the wrong PyTorch, the import stops and names the
+version it needs.
 
 `--no-deps` keeps pip from touching your PyTorch install. The compiled extensions are built
 against that exact PyTorch version. For any other version, build from source (see below).
@@ -263,8 +269,6 @@ per process and carries on with the fallback.
   and both were slower than PR #368's, so head_dim 64 still uses the fallback (F156, F165).
 - On long sequences (around 47k tokens, non-causal) the int8 default is up to 1.7 % slower per
   attention call than the fp8 kernel.
-- PyTorch 2.14 / ROCm 10.1 is not supported yet: on the WHQL driver it was tried with, PyTorch
-  2.14's own kernels do not run (F164).
 - End to end, the package has been run in Krea2 (fp16 and bf16) and MiniMax-H3 (bf16). The kernels
   themselves are checked bit for bit across shapes and layouts, and against an fp64 reference.
 

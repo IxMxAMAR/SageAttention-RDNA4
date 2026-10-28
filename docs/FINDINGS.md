@@ -1529,6 +1529,8 @@ Replacing the Triton quantization step with hand-written HIP, an independent rev
 
 **Status:** closed for now. PyTorch 2.14 support waits for a driver it runs on. The build now records the torch version it was built against, which a 2.14 wheel will need.
 
+**Update (2026-10-29).** PyTorch 2.14 runs on newer drivers: a tester on Windows 10 with Adrenalin 26.8.1 (#3), and the test machine itself after Adrenalin 26.10.1 replaced the driver above. Only that older driver failed. On both, the PyTorch 2.14 wheel passes 97 of 97 tests, and on the test machine its output is bit-identical to the PyTorch 2.13 wheel on all 87 checked cells, including the head_dim 64 fallback rebuilt with LLVM 24. v0.4.0 ships a wheel for each.
+
 ### F165 — head_dim 64 on the HIP prologue <sub>(track H36)</sub>
 
 **Question.** The first head_dim 64 kernel (F156) lost mostly to about 0.2 ms of non-kernel work per call. With the HIP prologue removing most of that, does it beat PR #368?
