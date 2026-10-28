@@ -9,8 +9,8 @@ that sit hand-written HIP attention kernels that take over the common case: head
 or bf16. Against PR #368's own kernels they are **1.5–2.0× faster on causal attention and
 1.06–1.3× faster on non-causal attention** in fp16, and **2.2× and 1.3× faster** in bf16, measured
 over the full call. Since v0.4.0 the quantization step in front of the kernel is hand-written as
-well, so short calls, from a few hundred to a few thousand tokens, also take only 0.58–0.80 of
-PR #368's time.
+well, so nothing is compiled on first use, and short calls of a few hundred tokens, which took up
+to 1.6× PR #368's time, are now about even with it.
 
 fp16 calls compute Q·K in int8 with one scale per token, which is more precise than fp8 at about the
 same speed. bf16 calls compute Q·K in fp8.
@@ -58,22 +58,27 @@ does not, so on a full card the gap is wider. The table is measured without that
 ### Short calls (v0.4.0)
 
 Every call quantizes K and V before the attention kernel runs. Up to v0.3.0 that was 3–4 Triton
-launches, and on short sequences the launches cost more than the attention itself, so the shortest
-calls were up to 5× slower than PR #368's. v0.4.0 does it in 1–2 launches of a prebuilt HIP code
-object. fp16, B=1, D=128, non-causal, `smooth_k` on, full call, our time divided by PR #368's:
+launches, and on short sequences the launches cost more than the attention itself. v0.4.0 does it
+in 1–2 launches of a prebuilt HIP code object. fp16, B=1, H=48, D=128, non-causal, `smooth_k` on,
+each call timed on its own (synchronized), our time divided by PR #368's:
 
-| N | H=24 | H=48 |
+| N | v0.3.0 | v0.4.0 |
 |---|---|---|
-| 288 | 0.58 | 0.68 |
-| 512 | 0.65 | 0.71 |
-| 1056 | 0.73 | 0.80 |
-| 4118 | 0.78 | 0.79 |
+| 288 | 1.30 | 0.85 |
+| 512 | 1.59 | 1.13 |
+| 1024 | 1.12 | 0.92 |
+| 4096 | 0.89 | 0.87 |
 
-Calls this short are noisy to time: the same binary timed twice in one block differed by up to 7 %.
-That is far smaller than the effect, but read the cells as ±0.05. At the production sizes in the
-tables above the new prologue is within 0.8 % of the old one, so those numbers stand. It also needs
-no compiler at run time: the first call in a fresh process takes about 0.16 s instead of about
-1.6 s, and there is no 32-bit limit on sequence length any more (F162).
+bf16 is within 6 % of these. Back-to-back calls this short are too noisy on this card to time:
+two runs of the same cells disagreed by far more than the effect, so only the one-at-a-time numbers
+are given. At the production sizes in the tables above the two prologues time the same within
+this card's noise (±2 %), so those numbers stand.
+
+It also needs no compiler at run time. In a fresh process in ComfyUI's environment, with an empty
+Triton cache, the first call takes 0.48 s instead of 1.9 s (PR #368's path: 0.24 s). Where Triton
+cannot build its launcher, v0.3.0's prologue could not run and calls fell back to PR #368's path;
+v0.4.0's default path does not use Triton. There is no 32-bit limit on sequence length any more
+(F162).
 
 All of these are ratios. On this card a software clock check can confirm that the clock did not
 move during a block, but it cannot pin the absolute clock. So the absolute milliseconds are not
@@ -179,7 +184,7 @@ against that exact PyTorch version. For any other version, build from source (se
 There is no prebuilt Linux wheel, but the kernels load on Linux too, thanks to
 [boxwrench](https://github.com/boxwrench) ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1)). It was tested on a Radeon AI PRO R9700, which is
 also `gfx1201`, under Ubuntu 24.04 with PyTorch `2.9.1+rocm7.2.1`. Build from source with
-`PYTORCH_ROCM_ARCH=gfx1201`. [docs/BUILD.md](docs/BUILD.md) describes the Windows build. Since
+`PYTORCH_ROCM_ARCH=gfx1201`; [docs/LINUX.md](docs/LINUX.md) has the steps. Since
 v0.4.0 the build records the PyTorch version it was built against and the runtime check compares
 with that, so a source build against your own PyTorch passes without any override.
 
@@ -253,8 +258,8 @@ per process and carries on with the fallback.
 - The prebuilt kernels target `gfx1201`, plus `gfx1200` behind a switch. The `gfx1200` builds have
   the same machine code as the `gfx1201` ones but have not been run on that card yet
   ([docs/GFX1200-TESTING.md](docs/GFX1200-TESTING.md)). Other GPUs use the fallback path.
-- Every speed and accuracy number here was measured on Windows. On Linux the kernels load and the
-  test suite passes, but nothing has been timed there yet.
+- Every speed and accuracy number here was measured on Windows. Linux results from two testers,
+  with torch 2.9.1 and a torch 2.14 nightly, are in [docs/LINUX.md](docs/LINUX.md).
 - head_dim 128 only. Two head_dim 64 kernels were built and tested, the second on the new prologue,
   and both were slower than PR #368's, so head_dim 64 still uses the fallback (F156, F165).
 - On long sequences (around 47k tokens, non-causal) the int8 default is up to 1.7 % slower per
@@ -269,13 +274,15 @@ still improve, but the returns are marginal now, and most of what is left is Tri
 toolchain rather than the attention kernel. If I could, I'd ship this with my own libraries for both
 of them -- but testing and modifying them takes far too long on one GPU.
 
-I've been using DeepSeek V4.1 to summarize my findings and run the tests for me. It has
-been genuinely good at running them across the whole matrix, and the next update will be done the
-same way.
+I've built this with AI coding tools. They wrote most of the kernel code, ran the tests across
+the whole matrix and summarized the findings. I chose what to try, read the results and decided
+what shipped, and nothing went in without passing the bit-for-bit and timing checks in
+docs/METHOD.md. The failures are written up next to the wins in docs/FINDINGS.md.
 
-Next up is head_dim 64, which still uses PR #368's kernel today. After that I may patch Triton for
-Windows for my own use case, or send it upstream. Either way it is a while off -- probably a month or
-more.
+Next up (v0.5) is head_dim 64, which still uses PR #368's kernel: two attempts came out slower,
+so it needs a new design. v0.5 also gets a clean-up pass, with clearer kernel names and fewer
+comments. After that I may patch Triton for Windows for my own use case, or send it upstream.
+Either way it is a while off -- probably a month or more.
 
 ## Credits and license
 
@@ -283,6 +290,6 @@ Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 - [SageAttention](https://github.com/thu-ml/SageAttention) by the THU-ML group: the
   quantized-attention method and the package this builds on.
-- The gfx12 port in [PR #368](https://github.com/thu-ml/SageAttention/pull/368) by DELUXA, which
+- The gfx12 port in [PR #368](https://github.com/thu-ml/SageAttention/pull/368) by [jammm](https://github.com/jammm) and [0xDELUXA](https://github.com/0xDELUXA), which
   provides the native fallback kernels and the baseline this work is measured against.
 - [boxwrench](https://github.com/boxwrench), for Linux support in the kernel loader ([#1](https://github.com/IxMxAMAR/SageAttention-RDNA4/pull/1)).
